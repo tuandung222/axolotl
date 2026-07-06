@@ -22,6 +22,9 @@ axolotl train examples/gemma4/e2b-vision-lora.yaml
 
 # E2B text-only Q4_0 llama.cpp-compatible QAT
 axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
+
+# E2B full-finetune Q4_0 QAT aligned with llama.cpp PTQ tensor coverage
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
 ```
 
 ## E2B text-only Q4_0 llama.cpp QAT
@@ -51,6 +54,20 @@ Run the QAT smoke or training job:
 ```bash
 axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
 ```
+
+For full finetuning aligned with llama.cpp's `Q4_0` tensor coverage for
+Gemma 4 E2B, use:
+
+```bash
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
+```
+
+The aligned config fake-quantizes the HF modules that convert to llama.cpp
+`Q4_0` tensors: attention `q/k/v/o` projections, MLP `gate/up/down`
+projections, and Gemma 4 per-layer input modules
+`per_layer_input_gate` and `per_layer_projection`. It intentionally skips
+`per_layer_model_projection`, because llama.cpp leaves
+`per_layer_model_proj.weight` as `F16` for the `Q4_0` preset.
 
 The dataset preparation script uses both parquet subsets from
 `tuandunghcmut/Nemotron-SFT-Agentic-v2-search-toolcalling-parquet`, removes

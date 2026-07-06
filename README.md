@@ -51,6 +51,9 @@ Changes included in this fork:
   - `llama_cpp_qat_skip_names`
 - Added a Gemma 4 E2B Q4_0 QAT example at
   `examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml`.
+- Added a full-finetune Gemma 4 E2B Q4_0 QAT config aligned with llama.cpp PTQ
+  tensor coverage at
+  `examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml`.
 - Added a non-reasoning dataset preparation script for
   `tuandunghcmut/Nemotron-SFT-Agentic-v2-search-toolcalling-parquet` at
   `examples/gemma4/scripts/prepare_nemotron_agentic_non_reasoning.py`.
@@ -84,6 +87,8 @@ python examples/gemma4/scripts/prepare_nemotron_agentic_non_reasoning.py \
   --output-dir examples/gemma4/data/nemotron_agentic_non_reasoning
 
 axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
+
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
 ```
 
 Validation performed on an NVIDIA H200:
@@ -94,10 +99,15 @@ Validation performed on an NVIDIA H200:
 - With `sequence_len: 8192`, preprocessing kept 8,484 train examples and 175
   eval examples.
 - A 20-step smoke train completed with `Q4_0` fake quantization active.
-- The Gemma 4 E2B run patched 366 decoder linear modules with
-  `LlamaCppFakeQuantLinear`.
-- The smoke run used `sdpa`, Cut Cross Entropy, bf16, TF32, LoRA, and the
-  Axolotl Gemma 4 fused Triton attention path.
+- A full one-epoch Gemma 4 E2B QAT run completed with `adamw_torch_8bit`,
+  cosine scheduling, bf16, TF32, Cut Cross Entropy, and `sdpa`.
+- The first full QAT config patched 205 attention/MLP decoder linear modules.
+- The aligned full QAT config statically matches llama.cpp `Q4_0` PTQ coverage
+  for Gemma 4 E2B: 275 fake-quantized HF linears corresponding to the 275 GGUF
+  tensors emitted as `Q4_0`. This includes attention `q/k/v/o`, MLP
+  `gate/up/down`, and Gemma 4 `per_layer_input_gate` /
+  `per_layer_projection`. It skips `per_layer_model_projection`, matching
+  llama.cpp's `F16` output for `per_layer_model_proj.weight`.
 
 ## 🎉 Latest Updates
 
