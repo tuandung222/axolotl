@@ -279,7 +279,7 @@ def normalize_config(cfg):
             ]
         )
         or cfg.is_multimodal
-    )
+    ) and not cfg.force_text_only
     if cfg.is_multimodal:
         cfg.processor_config = (
             cfg.processor_config or cfg.base_model_config or cfg.base_model

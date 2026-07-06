@@ -27,6 +27,78 @@
 </p>
 
 
+## Fork Additions: llama.cpp-Compatible QAT
+
+This fork adds an experimental training path for llama.cpp-compatible fake-quant
+QAT. The first validated target is `google/gemma-4-E2B-it` with Q4_0
+weight fake quantization and text-only SFT.
+
+Changes included in this fork:
+
+- Added `force_text_only` config support. This lets Axolotl treat a multimodal
+  checkpoint as a text-only SFT model for data processing and collation while
+  still loading the original checkpoint architecture with `type_of_model`.
+- Added the `axolotl.integrations.llama_cpp_qat.LlamaCppQATPlugin` integration.
+  It wraps selected decoder `nn.Linear` modules with OneBitLLMs
+  `LlamaCppFakeQuantLinear` layers after LoRA setup.
+- Added llama.cpp QAT config fields:
+  - `llama_cpp_qat`
+  - `llama_cpp_qat_quant_type`
+  - `llama_cpp_qat_activation_quant`
+  - `llama_cpp_qat_backend`
+  - `llama_cpp_qat_accumulator_dtype`
+  - `llama_cpp_qat_target_names`
+  - `llama_cpp_qat_skip_names`
+- Added a Gemma 4 E2B Q4_0 QAT example at
+  `examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml`.
+- Added a non-reasoning dataset preparation script for
+  `tuandunghcmut/Nemotron-SFT-Agentic-v2-search-toolcalling-parquet` at
+  `examples/gemma4/scripts/prepare_nemotron_agentic_non_reasoning.py`.
+- Added a Gemma 4 tool-safe non-reasoning Jinja template at
+  `examples/gemma4/gemma4_non_reasoning_tool_safe.jinja`.
+
+The QAT integration intentionally uses fake quantization only during training.
+It does not export packed GGUF tensors. After training, merge/export the normal
+HF weights or adapter as usual, then run llama.cpp PTQ with the matching
+quantization type. For the validated Q4_0 path, the training fake quantizer
+matches the llama.cpp block schema used by PTQ, so the later llama.cpp
+quantization pass sees the same fake-quant layout that was used during QAT.
+
+Additional dependency:
+
+```bash
+pip install onebitllms
+```
+
+If you are developing locally from the sibling OneBitLLMs repository, put it on
+`PYTHONPATH` instead:
+
+```bash
+export PYTHONPATH=/path/to/onebitllms/src:$PYTHONPATH
+```
+
+Minimal validated workflow:
+
+```bash
+python examples/gemma4/scripts/prepare_nemotron_agentic_non_reasoning.py \
+  --output-dir examples/gemma4/data/nemotron_agentic_non_reasoning
+
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
+```
+
+Validation performed on an NVIDIA H200:
+
+- Dataset preparation removed `reasoning_content`, `reasoning`, `thinking`, and
+  `<think>...</think>` spans.
+- Both parquet subsets were used.
+- With `sequence_len: 8192`, preprocessing kept 8,484 train examples and 175
+  eval examples.
+- A 20-step smoke train completed with `Q4_0` fake quantization active.
+- The Gemma 4 E2B run patched 366 decoder linear modules with
+  `LlamaCppFakeQuantLinear`.
+- The smoke run used `sdpa`, Cut Cross Entropy, bf16, TF32, LoRA, and the
+  Axolotl Gemma 4 fused Triton attention path.
+
 ## 🎉 Latest Updates
 
 - 2026/04:

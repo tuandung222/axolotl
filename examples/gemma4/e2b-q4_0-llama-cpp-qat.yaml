@@ -1,0 +1,91 @@
+base_model: google/gemma-4-E2B-it
+strict: false
+type_of_model: Gemma4ForConditionalGeneration
+force_text_only: true
+freeze_mm_modules: true
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+  - axolotl.integrations.llama_cpp_qat.LlamaCppQATPlugin
+
+cut_cross_entropy: true
+
+llama_cpp_qat: true
+llama_cpp_qat_quant_type: Q4_0
+llama_cpp_qat_activation_quant:
+llama_cpp_qat_backend: torch
+llama_cpp_qat_accumulator_dtype: float32
+llama_cpp_qat_target_names:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+llama_cpp_qat_skip_names:
+  - lm_head
+
+chat_template: jinja
+chat_template_jinja: examples/gemma4/gemma4_non_reasoning_tool_safe.jinja
+eot_tokens:
+  - "<turn|>"
+datasets:
+  - path: examples/gemma4/data/nemotron_agentic_non_reasoning/train.jsonl
+    type: chat_template
+    split: train
+    field_messages: conversations
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+test_datasets:
+  - path: examples/gemma4/data/nemotron_agentic_non_reasoning/eval.jsonl
+    type: chat_template
+    split: train
+    field_messages: conversations
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+val_set_size: 0
+output_dir: outputs/gemma4-e2b-q4_0-llama-cpp-qat
+
+sequence_len: 8192
+sample_packing: false
+pad_to_sequence_len: false
+dataset_num_proc: 16
+
+adapter: lora
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0
+lora_target_modules: 'model.language_model.layers.[\d]+.(_checkpoint_wrapped_module.)?(mlp|self_attn).(up|down|gate|q|k|v|o)_proj'
+
+gradient_accumulation_steps: 4
+micro_batch_size: 1
+num_epochs: 1
+max_steps: 20
+optimizer: adamw_torch_8bit
+lr_scheduler: cosine
+learning_rate: 0.0002
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+logging_steps: 1
+attn_implementation: sdpa
+
+warmup_ratio: 0.1
+evals_per_epoch: 0
+saves_per_epoch: 1
+weight_decay: 0.0
+
+wandb_project:
+wandb_entity:
+wandb_watch:
+wandb_name:
+wandb_log_model:
+special_tokens:

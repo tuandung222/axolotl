@@ -649,6 +649,14 @@ class AxolotlInputConfig(
             "ddp_find_unused_parameters=True."
         },
     )
+    force_text_only: bool | None = Field(
+        default=False,
+        json_schema_extra={
+            "description": "Treat a multimodal checkpoint as text-only for data processing "
+            "and collation while still allowing an explicit type_of_model to load the "
+            "checkpoint architecture."
+        },
+    )
 
     unfrozen_parameters: list[str] | None = Field(
         default=None,
