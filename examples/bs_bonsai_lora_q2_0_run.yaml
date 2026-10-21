@@ -1,0 +1,91 @@
+base_model: prism-ml/Ternary-Bonsai-4B-unpacked
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+load_in_8bit: false
+load_in_4bit: false
+strict: false
+
+plugins:
+  - axolotl.integrations.bs_qat.BSQATPlugin
+  - axolotl.integrations.liger.LigerPlugin
+
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+liger_layer_norm: true
+liger_fused_linear_cross_entropy: true
+
+bs_qat: true
+bs_qat_mode: "ternary"
+bs_qat_group_size: 128
+bs_qat_act_quant: false
+bs_qat_target_names:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+  - "gate_proj"
+  - "up_proj"
+  - "down_proj"
+bs_qat_skip_names:
+  - "lm_head"
+
+datasets:
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "1.v2"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "2.v01"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "3.bucket_b"
+    type: chat_template
+
+dataset_prepared_path: last_run_prepared
+val_set_size: 0
+output_dir: ./runs/axolotl-bs-lora-q2_0
+dataset_processes: 128
+
+sequence_len: 16384
+sample_packing: true
+pad_to_sequence_len: true
+
+adapter: lora
+lora_model_dir:
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0.05
+lora_target_linear: true
+lora_fan_in_fan_out:
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+gradient_accumulation_steps: 4
+micro_batch_size: 4
+max_steps: 1000
+optimizer: adamw_torch
+lr_scheduler: cosine
+learning_rate: 1.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+train_on_inputs: false
+group_by_length: false
+bf16: false
+fp16: true
+tf32: false
+
+gradient_checkpointing: true
+attn_implementation: flash_attention_4
+dataloader_num_workers: 0
+
+eval_steps:
+save_steps: 200
+logging_steps: 5

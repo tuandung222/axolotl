@@ -153,6 +153,7 @@ ATTN_IMPLS_SUPPORTING_PACKING = frozenset(
         "sage",
         "kernels-community/flash-attn2",
         "kernels-community/flash-attn3",
+        "kernels-community/flash-attn4",
         "kernels-community/sage-attention",
     }
 )

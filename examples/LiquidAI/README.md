@@ -40,6 +40,12 @@ Thanks to the team at LiquidAI for giving us early access to prepare for these r
     axolotl train examples/LiquidAI/lfm2-8b-a1b-lora.yaml
     ```
 
+    The shipped MoE LoRA example is configured for broad adapter coverage:
+    `lora_target_linear: true` adapts nearly all linear layers, while
+    `lora_target_parameters` adds the routed expert tensors
+    (`experts.gate_up_proj`, `experts.down_proj`). `lm_head` is excluded
+    automatically from the linear target expansion.
+
 ### TIPS
 
 - **Installation Error**: If you encounter `ImportError: ... undefined symbol ...` or `ModuleNotFoundError: No module named 'causal_conv1d_cuda'`, the `causal-conv1d` package may have been installed incorrectly. Try uninstalling it:

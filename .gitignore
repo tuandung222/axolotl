@@ -178,6 +178,16 @@ wandb
 lora-out/*
 qlora-out/*
 mlruns/*
+/artifacts/
+/runs/
+/local_data/
+/tmp/
+/last_run_prepared*/
+/*.gguf
+/*.log
+/*.pid
+/tmp_merge*.yaml
+examples/gemma4/data/
 
 /.quarto/
 prepared-datasets/

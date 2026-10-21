@@ -86,7 +86,11 @@ dependencies = [
     # Architecture-specific
     "fla-core==0.5.2 ; platform_machine != 'aarch64'",
     "flash-linear-attention==0.5.2 ; platform_machine != 'aarch64'",
+
+    # OneBitLLMs (custom fork with llama.cpp fake quant support)
+    "onebitllms @ git+https://github.com/tuandung222/onebitllms.git",
 ]
+
 
 [project.optional-dependencies]
 fla = ["flash-linear-attention[tilelang]==0.5.2", "tilelang==0.1.14"]
@@ -135,6 +139,9 @@ llmcompressor = [
     "llmcompressor>=0.10.0",
 ]
 fbgemm-gpu = ["fbgemm-gpu-genai>=1.3.0"]
+onebitllms = [
+    "onebitllms @ git+https://github.com/tuandung222/onebitllms.git",
+]
 opentelemetry = [
     "opentelemetry-api",
     "opentelemetry-sdk",

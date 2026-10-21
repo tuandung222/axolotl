@@ -91,6 +91,7 @@ class PatchManager:
         self,
         cfg: DictDefault,
         model_config: PretrainedConfig | addict.Dict,
+        model_kwargs: dict | None = None,
         inference: bool = False,
         tokenizer: PreTrainedTokenizerBase | None = None,
         processor: ProcessorMixin | None = None,
@@ -105,6 +106,7 @@ class PatchManager:
         """
         self.cfg = cfg
         self.model_config = model_config
+        self.model_kwargs = model_kwargs
         self.inference = inference
         self.tokenizer = tokenizer
         self.processor = processor

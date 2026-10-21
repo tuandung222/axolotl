@@ -79,7 +79,9 @@ class TestCapabilityTables:
     def test_does_not_support_packing(self, impl):
         assert impl not in ATTN_IMPLS_SUPPORTING_PACKING
 
-    @pytest.mark.parametrize("impl", ["flash_attention_2", "flash_attention_3"])
+    @pytest.mark.parametrize(
+        "impl", ["flash_attention_2", "flash_attention_3"]
+    )
     def test_uses_flash_lib(self, impl):
         assert impl in ATTN_IMPLS_USING_FLASH_LIB
 
@@ -319,6 +321,7 @@ class TestCanonicalValueAcceptance:
     def test_field_validator_accepts_hub_kernels(self):
         for impl in (
             "kernels-community/flash-attn3",
+            "kernels-community/flash-attn4",
             "kernels-community/sage-attention",
             "someorg/custom-kernel",
         ):

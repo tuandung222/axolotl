@@ -1,0 +1,81 @@
+base_model: prism-ml/Ternary-Bonsai-4B-unpacked
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+load_in_8bit: false
+load_in_4bit: false
+strict: false
+
+plugins:
+  - axolotl.integrations.bs_qat.BSQATPlugin
+  - axolotl.integrations.liger.LigerPlugin
+
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+liger_layer_norm: true
+liger_fused_linear_cross_entropy: true
+
+bs_qat: true
+bs_qat_mode: ternary
+bs_qat_group_size: 128
+bs_qat_act_quant: false
+bs_qat_lora_mode: internal_qat
+bs_qat_lora_r: 256
+bs_qat_lora_alpha: 512
+bs_qat_lora_dropout: 0.05
+bs_qat_freeze_non_lora: true
+bs_qat_target_names:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+bs_qat_skip_names:
+  - lm_head
+
+adapter:
+
+datasets:
+  - path: artifacts/bonsai_internal_qat_non_reasoning_v2/data/train.jsonl
+    ds_type: json
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+dataset_prepared_path: artifacts/bonsai_internal_qat_non_reasoning_v2/prepared
+val_set_size: 0
+output_dir: artifacts/bonsai_internal_qat_non_reasoning_v2/checkpoints
+dataset_num_proc: 256
+
+sequence_len: 24576
+sample_packing: true
+pad_to_sequence_len: true
+
+gradient_accumulation_steps: 4
+micro_batch_size: 8
+num_epochs: 1
+optimizer: adamw_torch
+lr_scheduler: cosine
+cosine_min_lr_ratio: 0.03
+learning_rate: 1.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+train_on_inputs: false
+group_by_length: false
+bf16: false
+fp16: true
+tf32: false
+
+gradient_checkpointing: true
+attn_implementation: kernels-community/flash-attn3
+dataloader_num_workers: 0
+
+eval_steps:
+save_steps: 200
+logging_steps: 5

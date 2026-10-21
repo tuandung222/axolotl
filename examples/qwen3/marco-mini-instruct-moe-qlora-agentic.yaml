@@ -1,0 +1,113 @@
+# ATH-MaaS/Marco-Mini-Instruct: qwen3_moe upcycle, hidden_size=1024,
+# num_hidden_layers=28, num_experts=256, num_experts_per_tok=8,
+# moe_intermediate_size=768 (2x Nano's). ~17.25B total params, same small
+# hidden_size/attention shape as Nano so QLoRA + ScatterMoE scales the same
+# way, just with more/larger expert tensors.
+base_model: ATH-MaaS/Marco-Mini-Instruct
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+strict: false
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+  - axolotl.integrations.kernels.KernelsPlugin
+  - axolotl.integrations.liger.LigerPlugin
+use_kernels: true
+use_scattermoe: true
+experts_implementation: scattermoe
+liger_layer_norm: true
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+
+cut_cross_entropy: true
+
+eot_tokens:
+  - "<|im_end|>"
+
+datasets:
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "1.v2"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "2.v01"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "3.bucket_b"
+    type: chat_template
+  - path: local_data/nemotron_v2_search.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+  - path: local_data/nemotron_v2_tool_calling.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+  - path: local_data/nemotron_v1_interactive_agent_train.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+dataset_prepared_path: last_run_prepared_marco_mini_agentic
+val_set_size: 0
+output_dir: ./runs/marco-mini-instruct-moe-qlora-agentic
+dataset_processes: 128
+
+sequence_len: 16384
+sample_packing: true
+pad_to_sequence_len: true
+
+load_in_4bit: true
+quantize_moe_experts: true
+adapter: qlora
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+lora_target_parameters:
+  - mlp.experts.gate_up_proj
+  - mlp.experts.down_proj
+
+lora_qkv_kernel: true
+lora_o_kernel: true
+lora_mlp_kernel: false
+
+train_on_inputs: false
+group_by_length: false
+
+# Larger total expert weight footprint than Nano even though the per-token
+# compute shape is identical -- smaller micro_batch than Nano to keep the
+# 4-bit expert weights + activations comfortably inside one GPU.
+gradient_accumulation_steps: 4
+micro_batch_size: 4
+num_epochs: 1
+optimizer: adamw_torch_8bit
+lr_scheduler: cosine
+learning_rate: 2.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.0
+
+bf16: auto
+tf32: true
+
+gradient_checkpointing: true
+activation_offloading: true
+attn_implementation: flash_attention_2
+dataloader_num_workers: 0
+
+eval_steps:
+save_steps: 200
+logging_steps: 5

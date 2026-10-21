@@ -288,6 +288,7 @@ class ModelLoader:
         self.patch_manager = PatchManager(
             cfg=cfg,
             model_config=self.model_config,
+            model_kwargs=self.model_kwargs,
             inference=inference,
             tokenizer=tokenizer,
             processor=self.processor,
@@ -1196,7 +1197,7 @@ class ModelLoader:
         return hf_impl
 
     def _check_model_requirements(self):
-        if self.cfg.model_config_type in ["lfm2-vl", "lfm2"]:
+        if self.cfg.model_config_type in ["lfm2", "lfm2_moe", "lfm2_vl", "lfm2-vl"]:
             from transformers.utils.import_utils import is_causal_conv1d_available
 
             if is_causal_conv1d_available():
@@ -1413,7 +1414,7 @@ class ModelLoader:
             except ImportError as exc:
                 raise ImportError(
                     "The 'onebitllms' package is required for use_onebitllms. "
-                    "Install it with: `uv pip install onebitllms`"
+                    "Install it with: `pip install git+https://github.com/tuandung222/onebitllms.git`"
                 ) from exc
 
             self.model = replace_linear_with_bitnet_linear(self.model)

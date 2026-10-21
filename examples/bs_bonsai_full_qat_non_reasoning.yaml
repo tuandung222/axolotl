@@ -1,0 +1,117 @@
+base_model: prism-ml/Ternary-Bonsai-4B-unpacked
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+load_in_8bit: false
+load_in_4bit: false
+strict: false
+
+plugins:
+  - axolotl.integrations.bs_qat.BSQATPlugin
+  - axolotl.integrations.liger.LigerPlugin
+
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+liger_layer_norm: true
+liger_fused_linear_cross_entropy: true
+
+bs_qat: true
+bs_qat_mode: ternary
+bs_qat_group_size: 128
+# BitNet-style W1.58A8: ternary weights *and* 8-bit per-token activation
+# fake-quant (bitnet_qat/ternary.py::activation_quant), on top of the group-128
+# ternary weight quant. Matches how ggml's quantized-weight matmul kernels
+# actually run activations through an int8 quantization step at inference, so
+# training sees the same activation precision the deployed Q2_0 GGUF gets --
+# every other config in this repo leaves this off (weight-only QAT).
+bs_qat_act_quant: true
+# No LoRA at all: full-parameter QAT. full_weight patches BitLinear with
+# use_lora=False (BitLinear.weight is the plain trainable shadow weight, fake-
+# quantized every forward), same as external_peft code-path-wise, but the name
+# doesn't misleadingly imply a PEFT adapter is attached (there is none --
+# adapter: is unset below, required for this mode). Matches the standalone
+# Bonsai trainer's own `use_lora=False` path (bitnet_qat/cli.py), which
+# likewise never freezes anything outside the LoRA branch.
+bs_qat_lora_mode: full_weight
+bs_qat_target_names:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+bs_qat_skip_names:
+  - lm_head
+
+adapter:
+
+datasets:
+  - path: artifacts/bonsai_internal_qat_non_reasoning_v2/data/train.jsonl
+    ds_type: json
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+# Reuses the v2 tokenized/packed cache (same base_model, tokenizer, dataset file,
+# sequence_len) so preprocessing does not need to re-run. output_dir is new so this
+# run's checkpoints never collide with the v2 LoRA run's.
+dataset_prepared_path: artifacts/bonsai_internal_qat_non_reasoning_v2/prepared
+val_set_size: 0
+output_dir: artifacts/bonsai_full_qat_non_reasoning/checkpoints
+dataset_num_proc: 256
+
+sequence_len: 24576
+sample_packing: true
+pad_to_sequence_len: true
+
+# Effective batch (packed sequences/optimizer step) = 2 * 16 * 4 GPUs = 128,
+# matching the v2 LoRA run's 8 * 4 * 4 = 128 so the two runs are comparable in
+# tokens/step. micro_batch_size is 4x smaller than v2's because full-weight
+# training carries optimizer state + gradients for all ~4B params instead of just
+# the ~300M LoRA tensors; start here and drop to 1 first if you see OOM.
+gradient_accumulation_steps: 16
+micro_batch_size: 2
+num_epochs: 1
+
+# adamw_torch_8bit is not optional here: full fp32 AdamW state for 4B params would
+# be ~32GB/replica on top of the ~8GB (bf16) weights + ~8GB grads. Also matches
+# the only other "full QAT, no LoRA" config in this repo (gemma4 e2b-q4_0
+# full-qat) and the standalone Bonsai trainer's own comment on `optim`.
+optimizer: adamw_torch_8bit
+lr_scheduler: cosine
+# 10x lower than the internal_qat LoRA run's 1e-4: that LR only ever moves a
+# freshly-zero-initialized low-rank delta, so it tolerates large steps. Here the
+# gradient updates the pretrained shadow weight directly for every target
+# projection, so a LoRA-scale LR would show up as visible degradation/instability
+# within the first few hundred steps. 1e-5 matches the one other validated
+# full-weight QAT config in this repo (gemma4 e2b-q4_0 full-qat, same 1e-5).
+learning_rate: 1.0e-5
+cosine_min_lr_ratio: 0.1
+warmup_ratio: 0.1
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+train_on_inputs: false
+group_by_length: false
+# bf16 (not the v2 LoRA run's fp16): full-weight QAT gradients are noisier
+# (STE through every target layer, not just a small LoRA delta), and fp16's
+# narrower dynamic range plus GradScaler adds instability risk that isn't worth
+# it on H200, which runs bf16 natively. Matches the standalone trainer's
+# `bf16: bool = True` default and the gemma4 full-qat precedent.
+bf16: true
+fp16: false
+tf32: true
+
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+attn_implementation: kernels-community/flash-attn3
+dataloader_num_workers: 0
+
+eval_steps:
+save_steps: 200
+logging_steps: 5

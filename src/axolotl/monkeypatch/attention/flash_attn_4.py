@@ -41,7 +41,6 @@ def _get_head_dims(model_config):
     if hasattr(cfg, "hidden_size") and hasattr(cfg, "num_attention_heads"):
         head_dim = cfg.hidden_size // cfg.num_attention_heads
         return head_dim, head_dim
-
     return None, None
 
 
@@ -261,3 +260,20 @@ def _pkg_version(name):
         return version(name)
     except Exception:  # pylint: disable=broad-except
         return "unknown"
+
+def resolve_flash_attn_4(model_config=None, requested_impl: str | None = None):
+    """Backward-compatible wrapper for older call sites."""
+    if requested_impl and "/" in requested_impl:
+        return None
+    if requested_impl not in {None, "flash_attention_2", "flash_attention_4"}:
+        return None
+
+    if fa4_usable(model_config):
+        configure_fa4()
+        return "flash_attention_4"
+    return None
+
+
+def patch_flash_attn_4(model_config=None):
+    """Backward-compatible wrapper for older call sites."""
+    return resolve_flash_attn_4(model_config, requested_impl="flash_attention_2")

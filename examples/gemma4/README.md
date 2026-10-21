@@ -22,6 +22,66 @@ axolotl train examples/gemma4/31b-lora-fsdp.yaml
 
 # E2B vision LoRA (1x80GB @ ~10.4 GiB)
 axolotl train examples/gemma4/e2b-vision-lora.yaml
+
+# E2B text-only Q4_0 llama.cpp-compatible QAT
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
+
+# E2B full-finetune Q4_0 QAT aligned with llama.cpp PTQ tensor coverage
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
+```
+
+## E2B text-only Q4_0 llama.cpp QAT
+
+This fork includes an experimental QAT path for `google/gemma-4-E2B-it` using
+OneBitLLMs llama.cpp-compatible fake quantization.
+
+The example is intentionally text-only:
+
+- `force_text_only: true` prevents Axolotl from selecting the multimodal
+  collator for Gemma 4 E2B.
+- `type_of_model: Gemma4ForConditionalGeneration` keeps the original checkpoint
+  architecture so the `model.language_model.*` weights load correctly.
+- LoRA targets are restricted to `model.language_model.layers.*`.
+- `llama_cpp_qat_quant_type: Q4_0` applies weight fake quantization that follows
+  the llama.cpp Q4_0 block layout.
+
+Prepare the non-reasoning tool-calling dataset:
+
+```bash
+python examples/gemma4/scripts/prepare_nemotron_agentic_non_reasoning.py \
+  --output-dir examples/gemma4/data/nemotron_agentic_non_reasoning
+```
+
+Run the QAT smoke or training job:
+
+```bash
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml
+```
+
+For full finetuning aligned with llama.cpp's `Q4_0` tensor coverage for
+Gemma 4 E2B, use:
+
+```bash
+axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
+```
+
+The aligned config fake-quantizes the HF modules that convert to llama.cpp
+`Q4_0` tensors: attention `q/k/v/o` projections, MLP `gate/up/down`
+projections, and Gemma 4 per-layer input modules
+`per_layer_input_gate` and `per_layer_projection`. It intentionally skips
+`per_layer_model_projection`, because llama.cpp leaves
+`per_layer_model_proj.weight` as `F16` for the `Q4_0` preset.
+
+The dataset preparation script uses both parquet subsets from
+`tuandunghcmut/Nemotron-SFT-Agentic-v2-search-toolcalling-parquet`, removes
+reasoning fields, strips `<think>...</think>` spans, and normalizes missing
+tool-call fields that break the Gemma 4 template renderer.
+
+The QAT integration requires OneBitLLMs to be installed or available on
+`PYTHONPATH`:
+
+```bash
+pip install git+https://github.com/tuandung222/onebitllms.git
 ```
 
 ### MoE Expert Quantization & Expert LoRA (26B-A4B only)

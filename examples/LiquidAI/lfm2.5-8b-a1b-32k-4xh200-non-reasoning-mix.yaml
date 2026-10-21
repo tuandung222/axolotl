@@ -1,0 +1,85 @@
+base_model: tuandunghcmut/LFM2.5-8B-A1B
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+strict: false
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+  - axolotl.integrations.liger.LigerPlugin
+
+cut_cross_entropy: true
+load_in_4bit: true
+
+# Liger is requested for the run, but current upstream/kernel support does not
+# yet patch lfm2_moe natively. Keeping the plugin loaded is harmless; the real
+# throughput win here is FA3 + CCE.
+liger_rope: true
+liger_rms_norm: true
+liger_glu_activation: true
+liger_layer_norm: true
+
+eot_tokens:
+  - "<|im_end|>"
+
+chat_template_kwargs:
+  enable_thinking: false
+
+datasets:
+  - path: local_data/lfm2_5_non_reasoning_plain.jsonl
+    ds_type: json
+    type: chat_template
+    field_messages: messages
+    field_thinking:
+    template_thinking_key:
+  - path: local_data/lfm2_5_non_reasoning_tools.jsonl
+    ds_type: json
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+dataset_prepared_path: last_run_prepared_lfm2_5_8b_a1b_32k_non_reasoning_mix
+val_set_size: 0
+output_dir: ./runs/lfm2.5-8b-a1b-32k-4xh200-non-reasoning-mix
+dataset_num_proc: 256
+
+sequence_len: 32768
+sample_packing: true
+pad_to_sequence_len: true
+
+adapter: qlora
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0.0
+lora_embedding_kernel: false
+lora_mlp_kernel: false
+lora_qkv_kernel: false
+lora_o_kernel: false
+lora_target_linear: true
+lora_target_parameters:
+  - experts.gate_up_proj
+  - experts.down_proj
+
+gradient_accumulation_steps: 8
+micro_batch_size: 2
+num_epochs: 1
+optimizer: adamw_bnb_8bit
+lr_scheduler: cosine
+learning_rate: 2.0e-4
+warmup_ratio: 0.03
+weight_decay: 0.01
+
+train_on_inputs: false
+group_by_length: false
+bf16: true
+tf32: true
+
+gradient_checkpointing: true
+selective_checkpointing: true
+attn_implementation: sdpa
+dataloader_num_workers: 8
+
+eval_steps:
+save_steps: 250
+logging_steps: 5

@@ -5,7 +5,19 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from transformers.integrations.accelerate import force_accelerate_hooks
+
+try:
+    from transformers.integrations.accelerate import force_accelerate_hooks
+except ImportError:
+    # Older transformers (predates this hook-forcing helper) -- fall back to a
+    # no-op decorator so the accelerate device-map hook forcing is simply skipped
+    # rather than crashing the import. Only affects big-model-inference-style
+    # device_map offloading, which axolotl's DeepSpeed/QLoRA training paths don't use.
+    def force_accelerate_hooks(*_args, **_kwargs):
+        def _noop_decorator(fn):
+            return fn
+
+        return _noop_decorator
 
 from axolotl.monkeypatch.lora_kernels import LINEAR_ATTN_IN_PROJS
 from axolotl.monkeypatch.models.gated_delta_net_ops import (
@@ -90,7 +102,12 @@ def _patched_decoder_forward(
     residual = hidden_states
     hidden_states = self.input_layernorm(hidden_states)
 
-    if self.block_type == "linear_attention":
+    # `block_type` is the current transformers attribute name; older releases
+    # (predating the block_type rename) call it `layer_type`. Fall back so this
+    # patch works against either.
+    block_type = getattr(self, "block_type", None) or getattr(self, "layer_type", None)
+
+    if block_type == "linear_attention":
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
             cache_params=past_key_values,
@@ -98,7 +115,7 @@ def _patched_decoder_forward(
             position_ids=position_ids,
             **kwargs,
         )
-    elif self.block_type == "full_attention":
+    elif block_type == "full_attention":
         attn_kwargs = dict(
             hidden_states=hidden_states,
             attention_mask=attention_mask,

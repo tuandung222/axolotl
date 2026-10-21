@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generator
@@ -309,15 +310,73 @@ def _load_from_local_path(
         if not load_dataset_kwargs.get("split"):
             load_dataset_kwargs["split"] = "train"
 
-        return load_dataset(
-            dataset_type,
-            data_files=dataset_config.path,
-            **load_dataset_kwargs,
-        )
+        data_file_path = dataset_config.path
+        temp_file_path = None
+        if dataset_type == "json" and dataset_config.get("field_tools"):
+            data_file_path = _stabilize_tools_json_column(
+                local_path, dataset_config.get("field_tools")
+            )
+            if data_file_path != str(local_path):
+                temp_file_path = data_file_path
+
+        try:
+            return load_dataset(
+                dataset_type,
+                data_files=data_file_path,
+                **load_dataset_kwargs,
+            )
+        finally:
+            if temp_file_path:
+                Path(temp_file_path).unlink(missing_ok=True)
     else:
         raise ValueError(
             "Unhandled dataset load: local path exists, but is neither a directory or a file"
         )
+
+
+def _stabilize_tools_json_column(local_path: Path, field_tools: str) -> str:
+    """Stringify heterogeneous tool schema payloads before Arrow infers nested structs.
+
+    ``chat_template`` already knows how to parse a top-level tools column stored as a
+    JSON string, so we normalize here only to keep ``datasets`` from failing on rows
+    whose tool schemas have different nested ``parameters.properties`` shapes.
+    """
+    with local_path.open("r", encoding="utf-8") as src:
+        needs_rewrite = any(
+            (tools := json.loads(line).get(field_tools)) is not None
+            and not isinstance(tools, str)
+            for line in src
+            if line.strip()
+        )
+    if not needs_rewrite:
+        return str(local_path)
+
+    suffix = local_path.suffix if local_path.suffix else ".jsonl"
+    fd, temp_path = tempfile.mkstemp(
+        prefix="axolotl_tools_stable_",
+        suffix=suffix,
+    )
+    os.close(fd)
+
+    with local_path.open("r", encoding="utf-8") as src, open(
+        temp_path, "w", encoding="utf-8"
+    ) as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            tools = row.get(field_tools)
+            if tools is not None and not isinstance(tools, str):
+                row[field_tools] = json.dumps(tools, ensure_ascii=False)
+            dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    LOG.info(
+        "Stabilized heterogeneous `%s` column for %s into %s",
+        field_tools,
+        local_path,
+        temp_path,
+    )
+    return temp_path
 
 
 def _load_from_hub(

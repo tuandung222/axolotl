@@ -1,0 +1,110 @@
+base_model: tuandunghcmut/LFM2.5-8B-A1B
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# LFM2-MoE needs transformers with Lfm2MoeForCausalLM support (already present
+# in transformers>=5.9 in this environment; the upstream LiquidAI example
+# still pins a pre-release commit for older environments, see
+# examples/LiquidAI/README.md).
+# If `causal-conv1d` is installed, uninstall it -- it breaks LFM2's own conv
+# layers (see src/axolotl/loaders/model.py's lfm2/lfm2_moe warning).
+
+plugins:
+  - axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin
+
+cut_cross_entropy: true
+load_in_4bit: true
+
+strict: false
+
+eot_tokens:
+  - "<|im_end|>"
+
+datasets:
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "1.v2"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "2.v01"
+    type: chat_template
+  - path: custom-org/planning-sft-dataset-v07022026
+    name: "3.bucket_b"
+    type: chat_template
+  # Tool-calling data. field_thinking/template_thinking_key are explicitly
+  # nulled so reasoning_content is dropped before tokenization -- train on
+  # tool_calls/content only, not the reasoning traces.
+  # Local copies: the hub tool_calling.parquet has a __parse_error column with
+  # one malformed record that breaks pyarrow schema casting on load; these are
+  # the same rows with only messages/tools kept and the bad row dropped.
+  # Generated in the axolotl_tuandunghcmut internal_qat run -- reuse the same
+  # local_data/ directory (see bs_bonsai_internal_qat_lora_agentic_run.yaml).
+  - path: local_data/nemotron_v2_search.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+  - path: local_data/nemotron_v2_tool_calling.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+  # Local copy: the hub repo's split-discovery also builds the raw
+  # `interactive_agent.parquet` file (same CastError as tool_calling above) even
+  # when only `train` is requested, so pull the clean train parquet directly.
+  - path: local_data/nemotron_v1_interactive_agent_train.parquet
+    ds_type: parquet
+    type: chat_template
+    field_messages: messages
+    field_tools: tools
+    field_thinking:
+    template_thinking_key:
+
+dataset_prepared_path: last_run_prepared_lfm2_5_8b_a1b_agentic
+val_set_size: 0
+output_dir: ./runs/lfm2.5-8b-a1b-full-agentic
+dataset_processes: 128
+
+sequence_len: 16384
+sample_packing: true
+pad_to_sequence_len: true
+
+adapter: qlora
+lora_model_dir:
+lora_r: 32
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_linear: true
+lora_target_parameters:
+  - experts.gate_up_proj
+  - experts.down_proj
+
+gradient_accumulation_steps: 8
+micro_batch_size: 1
+num_epochs: 1
+optimizer: adamw_bnb_8bit
+lr_scheduler: cosine
+learning_rate: 2.0e-4
+warmup_ratio: 0.05
+weight_decay: 0.01
+
+train_on_inputs: false
+group_by_length: false
+bf16: true
+tf32: true
+
+gradient_checkpointing: true
+# Only 6/24 layers are full_attention (rest are short-range conv per LFM2's
+# hybrid architecture); selective checkpointing saves those attention outputs
+# so backward doesn't recompute them, at the cost of one hidden-state-sized
+# tensor per attention layer.
+selective_checkpointing: true
+attn_implementation: flash_attention_2
+dataloader_num_workers: 0
+
+eval_steps:
+save_steps: 200
+logging_steps: 5
