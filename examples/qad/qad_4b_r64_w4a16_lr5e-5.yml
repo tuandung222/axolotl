@@ -1,0 +1,63 @@
+# QAD: Qwen3.5-4B v7 r64. Student = GPTQ W4A16 g128 weights (calA_fixed_1024) fake-quantised on the SAME grid;
+# teacher = BF16 merged untied model. Full-parameter, text-only. Run `scripts/00_prepare_init.py` first.
+# Rules (AGENTS.md): chat_template tokenizer_default, no QAT-plugin template, umask 000, outputs chmod a+rwX.
+
+base_model: artifacts/student_init_4b_r64      # dense bf16 = dequantised PTQ weights (+ untied lm_head)
+strict: false
+
+plugins:
+  - axolotl.integrations.qad.QADPlugin          # NOT cut_cross_entropy: the QAD trainer computes its own chunked KL
+
+qad_trainer: true
+qad_scales_path: artifacts/student_init_4b_r64/qad_scales.safetensors
+qad_group_size: 128
+qad_teacher_path: /home/dungvpt/axolotl_planning_v2/outputs/merged/qwen35_4b_v7_r64_untied
+qad_kl_alpha: 1.0
+qad_ce_alpha: 0.0
+qad_temperature: 1.0
+qad_chunk_tokens: 1024
+qad_freeze_head_and_embed: true
+
+datasets:
+  - path: /home/dungvpt/axolotl_planning_v2/data/train/train_smart_editor_agent_thinking_v7_20260924.jsonl
+    ds_type: json
+    type: chat_template
+    chat_template: tokenizer_default
+    field_messages: messages
+    field_thinking: thinking
+val_set_size: 0.0
+dataset_num_proc: 16
+dataset_prepared_path: ./.cache/prepared_qad_4b_v7
+output_dir: ./outputs/qad-4b-r64-w4a16-lr5e-5
+
+sequence_len: 32768
+sample_packing: true
+pad_to_sequence_len: true
+
+micro_batch_size: 1
+gradient_accumulation_steps: 8      # global batch = 1 * 8 * 2 GPUs = 16
+num_epochs: 1
+# max_steps: 200                    # smoke/pilot: override from the CLI (scripts/10_train.sh --max_steps N)
+
+optimizer: adamw_torch_fused
+learning_rate: 5.0e-5               # was 5e-6: too small to flip any INT4 level (checkpoint-77: 0.00003% flipped)
+lr_scheduler: cosine
+warmup_ratio: 0.03
+weight_decay: 0.0
+max_grad_norm: 1.0
+
+bf16: true
+tf32: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+flash_attention: false
+sdpa: true
+
+deepspeed: configs/deepspeed_zero2.json
+
+logging_steps: 1
+save_steps: 25                      # ~24 min; inspect flip-rate early
+save_total_limit: 14
+save_only_model: true
+use_wandb: false

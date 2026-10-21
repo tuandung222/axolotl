@@ -122,6 +122,24 @@ axolotl train examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml
 </details>
 
 <details>
+<summary><h2 style="display:inline">Fork Additions: QAD (Quantization-Aware Distillation for W4A16 PTQ/GPTQ)</h2></summary>
+
+This fork includes **QAD** (`axolotl.integrations.qad.QADPlugin`), a Quantization-Aware Distillation integration for symmetric 4-bit (`W4A16`, `group_size: 128`, `q in [-8, 7]`) models initialized directly from `compressed-tensors` PTQ/GPTQ or RTN checkpoints. Full documentation is in [`src/axolotl/integrations/qad/README.md`](src/axolotl/integrations/qad/README.md).
+
+Highlights:
+
+- **Fixed-Scale PTQ Grid Parity (`FQLinear`)**: Preserves the exact per-group PTQ scales (`qad_scales.safetensors`) as buffers so that `fake_quant(W_ptq) == W_ptq` bit-identically at step 0, avoiding the ~85% weight re-rounding degradation caused by dynamic scale recomputation.
+- **Learned Step Size Quantization (`qad_learn_scale: true`)**: Optional per-group trainable log-multiplier (`fq_logs`) initialized at `0` for fine-grained scale adaptation via LSQ gradients.
+- **Internal LoRA on Fixed INT4 Grid (`qad_internal_lora: true`, `FQLoRALinear`)**: Applies LoRA inside the quantizer (`W_eff = Q(W + (alpha/r) * B @ A)`) while freezing base weights, allowing zero-overhead merge and bit-exact export back to pure INT4 `compressed-tensors` format.
+- **Chunked Full-Vocab & Top-K KL Distillation (`AxolotlQADTrainer`)**: Computes `KL(Teacher || Student)` in memory-efficient token chunks (`qad_chunk_tokens: 1024`) with activation checkpointing over large vocabularies (e.g., 248K tokens on Qwen3.5) without materializing full `[B, T, V]` logit tensors.
+- **End-to-End PTQ Init & vLLM Export Scripts**:
+  - `scripts/qad/prepare_init.py` & `scripts/qad/prepare_init_rtn.py`: Unpacks `compressed-tensors` PTQ or RTN checkpoints into dense BF16 student weights + `qad_scales.safetensors`.
+  - `scripts/qad/export_w4a16.py` & `scripts/qad/verify_export.py`: Repacks trained checkpoints into `compressed-tensors` `pack-quantized` W4A16 format and verifies bit-exactness.
+  - `scripts/qad/to_vllm_layout.py`: Maps exported checkpoints to vLLM `Qwen3_5ForConditionalGeneration` layout.
+
+</details>
+
+<details>
 <summary><h2 style="display:inline">Fork Additions: Agentic Dataset Stabilization & Model Support</h2></summary>
 
 - **Heterogeneous Tool Schema Stabilization**:
