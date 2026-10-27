@@ -191,7 +191,7 @@ def _internal_lora_kwargs(cfg) -> dict:
 
 
 def mark_only_internal_lora_as_trainable(model: nn.Module) -> tuple[int, int]:
-    """Freeze everything except KH internal LoRA parameters.
+    """Freeze everything except BS internal LoRA parameters.
 
     Returns ``(trainable_tensors, trainable_parameters)``.
     """
@@ -264,7 +264,7 @@ class InternalQATLoRASaveCallback(TrainerCallback):
             },
         )
         LOG.info(
-            "Saved KH internal-QAT LoRA adapter: tensors=%s parameters=%s path=%s",
+            "Saved BS internal-QAT LoRA adapter: tensors=%s parameters=%s path=%s",
             info["tensors"],
             info["parameters"],
             info["path"],
@@ -326,7 +326,7 @@ class BSQATPlugin(BasePlugin):
             config={"source": "axolotl_bs_qat_post_train"},
         )
         LOG.info(
-            "Saved final KH internal-QAT LoRA adapter: tensors=%s parameters=%s path=%s",
+            "Saved final BS internal-QAT LoRA adapter: tensors=%s parameters=%s path=%s",
             info["tensors"],
             info["parameters"],
             info["path"],
@@ -401,7 +401,7 @@ class BSQATPlugin(BasePlugin):
         )
         if _is_internal_qat(cfg):
             LOG.info(
-                "KH internal QAT LoRA trainable_tensors=%s trainable_parameters=%s",
+                "BS internal QAT LoRA trainable_tensors=%s trainable_parameters=%s",
                 trainable_tensors,
                 trainable_parameters,
             )

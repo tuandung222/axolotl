@@ -1,4 +1,4 @@
-"""Utilities for KH internal-QAT LoRA checkpoints.
+"""Utilities for BS internal-QAT LoRA checkpoints.
 
 Internal-QAT LoRA stores ``lora_A``/``lora_B`` directly on ``BitLinear`` so the
 forward path is ``QDQ(W + LoRA)``. These tensors are intentionally not PEFT

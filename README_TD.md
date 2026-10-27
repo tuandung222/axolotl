@@ -29,6 +29,32 @@
 
 
 <details>
+<summary><h2 style="display:inline">Fork Additions: BS2_QAT (Bonsai-2 Sylvester Walsh-Hadamard + PQ2_0 Ternary QAT)</h2></summary>
+
+This fork adds **BS2_QAT** (`axolotl.integrations.bs2_qat.BS2QATPlugin`), a mathematically optimized Sylvester Walsh-Hadamard + `PQ2_0` Group-128 Least-Squares Ternary QAT integration designed for the **`Ternary-Bonsai-2-{2B, 4B, 9B, 27B}`** (`Qwen3.5`) family (`tuandunghcmut/QW-3.5-BS-2-{2B,4B,9B}-bf16`). Full documentation and mathematical derivations are in [`src/axolotl/integrations/bs2_qat/README.md`](src/axolotl/integrations/bs2_qat/README.md).
+
+Highlights:
+
+- **Block-wise Sylvester Walsh-Hadamard Rotation (`fwht_fast`)**:
+  - Rotates weights into the Hadamard domain ($\tilde{W} = (W \odot \mathbf{s})\mathcal{H}_B$) to suppress outlier channels before ternary quantization.
+  - Uses L2-cache-resident GEMM for $B \le 512$ (`2B`, `4B`) and 2D Kronecker factorization ($\hat{H}_{B_1} \otimes \hat{H}_{B_2}$) for $B > 512$ (`9B` with $B=4096$, `27B` with $B=1024$), reducing FLOPs by $32\times$ at $B=4096$.
+- **Bit-Exact `PQ2_0` Least-Squares Group-128 Ternary Quantizer**:
+  - Uses Boolean-mask 2-stage Least-Squares scale estimation ($s^* = \sum |w_i| m_i / \sum m_i$ rounded to `float16`), matching **100.0000%** of all discrete trits $\{-1, 0, +1\}$ and FP16 scales in `Ternary-Bonsai-2` GGUF/MLX checkpoints (including zero-row safety).
+- **Collapsed Identity Jacobian Backward Pass ($\mathcal{T}^{-1} \circ \mathcal{I}_{\text{STE}} \circ \mathcal{T} = \mathcal{I}$)**:
+  - Eliminates 100% of Hadamard transforms from the backward pass when `bs2_qat_store_rotated: false` and saves ~180 MB of Autograd VRAM per layer (~9x faster step time).
+- **Built-in Canonical Sign Vectors (`builtin_signs.py`)**:
+  - Bundles all 8 canonical sign vectors (`2048, 2560, 4096, 5120, 6144, 9216, 12288, 17408`) across `2B`, `4B`, `9B`, and `27B`, requiring no external GGUF/MLX files when training unfolded HF checkpoints.
+- **Three Training Modes (`bs2_qat_lora_mode`)**:
+  - `full_weight`: Full-parameter QAT on `Bonsai2LinearFakeQuant.weight`.
+  - `internal_qat`: Trains internal `lora_A`/`lora_B` *inside* the Hadamard + `PQ2_0` quantizer as $\mathcal{T}^{-1}(Q_{\text{PQ2\_0}}(\mathcal{T}(W + \frac{\alpha}{r}BA)))$ and saves lightweight `bs2_internal_qat_lora` sidecars.
+  - `external_peft`: Standard PEFT LoRA outside the Hadamard fake-quantized layer.
+- **Example Configs & Tests**:
+  - `examples/bs2_bonsai_2b_internal_qat_lora.yaml` & `examples/bs2_bonsai_2b_full_qat.yaml`
+  - `tests/integrations/test_bs2_qat.py`
+
+</details>
+
+<details>
 <summary><h2 style="display:inline">Fork Additions: BS_QAT Ternary/Binary QAT (BitLinear)</h2></summary>
 
 This fork adds **BS_QAT** (`axolotl.integrations.bs_qat.BSQATPlugin`), a

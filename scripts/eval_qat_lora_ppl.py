@@ -2,7 +2,7 @@
 """Evaluate QAT + LoRA checkpoints by answer-only perplexity.
 
 This script loads a Transformers causal LM, patches the target linears with
-KH BitLinear fake quant, then scores the same longest benchmark
+BS BitLinear fake quant, then scores the same longest benchmark
 conversations against each checkpoint's LoRA weights. ``--lora-mode`` selects
 how those weights are loaded: ``external_peft`` attaches/switches PEFT
 adapters (`adapter_config.json` checkpoints); ``internal_qat`` reloads the
@@ -462,7 +462,7 @@ def main() -> None:
             target_names=tuple(args.target_names) if args.target_names else None,
             skip_names=tuple(args.skip_names),
         )
-    print(f"Applied KH fake-quant wrappers: patched_linears={patched}")
+    print(f"Applied BS fake-quant wrappers: patched_linears={patched}")
     model.eval()
 
     rows = []

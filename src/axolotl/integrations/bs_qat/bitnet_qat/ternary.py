@@ -70,7 +70,7 @@ def quantize_ternary(
     n_groups = in_padded // group_size
 
     wg = w_pad.reshape(out_features, n_groups, group_size).to(torch.float32)
-    # --- Kiet Hoang's original implementation (kept for reference, superseded below) ---
+    # --- Previous absmax implementation (kept for reference, superseded below) ---
     # scale = wg.abs().amax(dim=-1, keepdim=True).clamp(min=eps)  # (out, n_groups, 1)
     # if fp16_scale:
     #     # The deployed Q2_0 container stores the group scale in fp16; round here

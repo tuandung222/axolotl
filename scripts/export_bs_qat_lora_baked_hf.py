@@ -4,9 +4,9 @@
 This script performs the HF-side part of the GGUF export pipeline:
 
 1. Load the full-precision HF base model.
-2. Load either a PEFT external LoRA adapter or KH internal-QAT LoRA
+2. Load either a PEFT external LoRA adapter or BS internal-QAT LoRA
    tensors.
-3. Replace the configured target ``nn.Linear`` modules with KH
+3. Replace the configured target ``nn.Linear`` modules with BS
    ``BitLinear`` fake-quant wrappers.
 4. Merge PEFT LoRA deltas into the ``BitLinear.weight`` shadow weights.
 5. Bake every ``BitLinear`` into a plain ``nn.Linear`` whose weights equal the

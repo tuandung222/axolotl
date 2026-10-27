@@ -6,7 +6,7 @@ load_in_8bit: false
 load_in_4bit: false
 strict: false
 
-# Kích hoạt Plugin của KH
+# Kích hoạt Plugin của BS
 plugins:
   - axolotl.integrations.bs_qat.BSQATPlugin
   - axolotl.integrations.liger.LigerPlugin

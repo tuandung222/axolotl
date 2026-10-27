@@ -1,0 +1,53 @@
+# ==============================================================================
+# Bonsai-2 (Qwen3.5) Sylvester Walsh-Hadamard + PQ2_0 Ternary QAT
+# Mode: Full-Weight QAT (Every target Linear weight trained through Hadamard QAT)
+# ==============================================================================
+base_model: tuandunghcmut/QW-3.5-BS-2-2B-bf16
+model_type: Qwen3_5ForConditionalGeneration
+processor_type: AutoProcessor
+
+plugins:
+  - axolotl.integrations.bs2_qat.BS2QATPlugin
+
+# --- BS2 Hadamard Ternary QAT Configuration ---
+bs2_qat: true
+bs2_qat_group_size: 128
+bs2_qat_block_size: null          # Auto-inferred: 512 for 2B/4B, 4096 for 9B, 1024 for 27B
+bs2_qat_signs_path: builtin       # Uses built-in canonical Ternary-Bonsai-2 signs
+bs2_qat_store_rotated: false      # Master weights stay in standard unfolded Qwen3.5 space
+bs2_qat_lora_mode: full_weight    # Train full weights directly through T^-1(Q_PQ2_0(T(W)))
+bs2_qat_snap_on_finish: true      # Snap to exact Hadamard PQ2_0 ternary grid at end of training
+
+adapter:
+
+datasets:
+  - path: examples/tiny_data.jsonl
+    type: chat_template
+
+dataset_prepared_path: last_run_prepared_bs2_full_qat
+val_set_size: 0.0
+output_dir: ./outputs/bs2-bonsai-2b-full-qat
+
+sequence_len: 4096
+sample_packing: false
+pad_to_sequence_len: false
+
+micro_batch_size: 1
+gradient_accumulation_steps: 8
+num_epochs: 1
+optimizer: adamw_torch_fused
+lr_scheduler: cosine
+learning_rate: 2.0e-5
+weight_decay: 0.01
+warmup_ratio: 0.05
+max_grad_norm: 1.0
+
+bf16: auto
+tf32: true
+gradient_checkpointing: true
+flash_attention: true
+
+logging_steps: 5
+save_strategy: steps
+save_steps: 100
+save_total_limit: 2
