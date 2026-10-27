@@ -12,20 +12,26 @@ from torch.utils.checkpoint import checkpoint
 
 def _chunk_loss(hs, ht, ws, wt, labels, temperature, kl_alpha, ce_alpha, topk=None, topk_mode="truncated"):
     ls = (hs @ ws.t()).float()
-    with torch.no_grad():
-        lt = (ht @ wt.t()).float()
-        logp_t = F.log_softmax(lt / temperature, dim=-1)
-        idx = lt.topk(topk, dim=-1).indices if topk else None
-    logp_s = F.log_softmax(ls / temperature, dim=-1)
     if topk is None:  # full-vocab KL(T || S)
-        kl = (logp_t.exp() * (logp_t - logp_s)).sum()
+        with torch.no_grad():
+            lt = (ht @ wt.t()).float()
+            logp_t = F.log_softmax(lt / temperature, dim=-1)
+        logp_s = F.log_softmax(ls / temperature, dim=-1)
+        kl = F.kl_div(logp_s, logp_t, reduction="sum", log_target=True)
     elif topk_mode == "truncated":  # teacher's top-k terms of the full KL; student log-probs keep the full-vocab
-        lt_k, ls_k = logp_t.gather(-1, idx), logp_s.gather(-1, idx)  # denominator, so mass leaking to the tail is penalised
-        kl = (lt_k.exp() * (lt_k - ls_k)).sum()
-    elif topk_mode == "renorm":  # both distributions renormalised over the teacher's top-k tokens only
-        lt_k = F.log_softmax(lt.gather(-1, idx) / temperature, dim=-1)
+        with torch.no_grad():
+            lt = (ht @ wt.t()).float()
+            idx = lt.topk(topk, dim=-1).indices
+            lt_k = F.log_softmax(lt / temperature, dim=-1).gather(-1, idx)
+        ls_k = F.log_softmax(ls / temperature, dim=-1).gather(-1, idx)  # denominator, so mass leaking to the tail is penalised
+        kl = F.kl_div(ls_k, lt_k, reduction="sum", log_target=True)
+    elif topk_mode == "renorm":  # both distributions renormalised over the teacher's top-k tokens only (no full-vocab log_softmax!)
+        with torch.no_grad():
+            lt = (ht @ wt.t()).float()
+            lt_top, idx = lt.topk(topk, dim=-1)
+            lt_k = F.log_softmax(lt_top / temperature, dim=-1)
         ls_k = F.log_softmax(ls.gather(-1, idx) / temperature, dim=-1)
-        kl = (lt_k.exp() * (lt_k - ls_k)).sum()
+        kl = F.kl_div(ls_k, lt_k, reduction="sum", log_target=True)
     else:
         raise ValueError(f"unknown topk_mode {topk_mode}")
     kl = kl * (temperature**2)

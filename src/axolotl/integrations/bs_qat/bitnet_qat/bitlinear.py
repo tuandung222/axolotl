@@ -26,6 +26,77 @@ from .ternary import (
 )
 
 
+class _BitLinearInternalLoRASTE(torch.autograd.Function):
+    """Fused Internal-LoRA BitLinear with rank-r factored backward.
+
+    Eliminates the dense `[out_features, in_features]` weight-gradient GEMM
+    `grad_W = grad_Y^T @ X` when the base weight `W_0` is frozen (`requires_grad=False`)
+    and only `lora_A` `[r, in_features]` and `lora_B` `[out_features, r]` are trained.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        lora_a: torch.Tensor,
+        lora_B: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        lora_scaling: float,
+        mode: str,
+        group_size: int,
+        eps: float,
+    ) -> torch.Tensor:
+        w = weight.to(torch.float32) + lora_scaling * (lora_B @ lora_a)
+        if mode == MODE_INT4:
+            w = w.to(torch.bfloat16).to(torch.float32)
+        w_eff = fake_quantize(w, mode, group_size, eps).to(weight.dtype)
+
+        empty = torch.empty(0, device=x.device)
+        need_lora_grad = ctx.needs_input_grad[2] or ctx.needs_input_grad[3]
+        ctx.save_for_backward(
+            x if need_lora_grad else empty,
+            w_eff if ctx.needs_input_grad[0] else empty,
+            lora_a if ctx.needs_input_grad[3] else empty,
+            lora_B if ctx.needs_input_grad[2] else empty,
+        )
+        ctx.lora_scaling = lora_scaling
+        ctx.has_bias = bias is not None
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+        return F.linear(x, w_eff, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        x, w_eff, lora_a, lora_B = ctx.saved_tensors
+        lora_scaling = ctx.lora_scaling
+        compute_dtype = grad_output.dtype
+        grad_out_2d = grad_output.reshape(-1, grad_output.shape[-1])
+
+        grad_x = grad_lora_a = grad_lora_B = grad_bias = None
+
+        if ctx.needs_input_grad[0]:
+            w_in = w_eff.to(compute_dtype) if w_eff.dtype != compute_dtype else w_eff
+            grad_x = torch.matmul(grad_out_2d, w_in).reshape(grad_output.shape[:-1] + (w_in.shape[1],))
+
+        if ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
+            x_2d = x.reshape(-1, x.shape[-1])
+            if x_2d.dtype != compute_dtype:
+                x_2d = x_2d.to(compute_dtype)
+            if ctx.needs_input_grad[2]:
+                b_cast = lora_B.to(compute_dtype) if lora_B.dtype != compute_dtype else lora_B
+                gb = torch.matmul(grad_out_2d, b_cast)
+                grad_lora_a = (torch.matmul(gb.t(), x_2d).to(torch.float32) * lora_scaling).to(lora_a.dtype)
+            if ctx.needs_input_grad[3]:
+                a_cast = lora_a.to(compute_dtype) if lora_a.dtype != compute_dtype else lora_a
+                xa = torch.matmul(x_2d, a_cast.t())
+                grad_lora_B = (torch.matmul(grad_out_2d.t(), xa).to(torch.float32) * lora_scaling).to(lora_B.dtype)
+
+        if ctx.has_bias and ctx.needs_input_grad[4]:
+            grad_bias = grad_out_2d.sum(dim=0).to(ctx.bias_dtype)
+
+        return grad_x, None, grad_lora_a, grad_lora_B, grad_bias, None, None, None, None
+
+
 class BitLinear(nn.Module):
     """Linear layer with group-wise low-bit weight fake-quant (QAT).
 
@@ -111,6 +182,9 @@ class BitLinear(nn.Module):
 
     def _fake_quantized_weight(self) -> torch.Tensor:
         if not self._cacheable_weight():
+            if not self.use_lora and self.mode != MODE_INT4:
+                # Pass self.weight directly without outer bf16->fp32->bf16 Autograd cast nodes
+                return fake_quantize(self.weight, self.mode, self.group_size, self.eps)
             w = self.weight.to(torch.float32)
             if self.use_lora:
                 a = self.lora_dropout(self.lora_A)
@@ -127,10 +201,9 @@ class BitLinear(nn.Module):
         key = (self.weight.device, self.weight.dtype, self.weight._version)
         if self._cached_weight_key != key or self._cached_weight is None:
             with torch.no_grad():
-                w = self.weight.to(torch.float32)
                 self._cached_weight = fake_quantize(
-                    w, self.mode, self.group_size, self.eps
-                ).to(self.weight.dtype)
+                    self.weight, self.mode, self.group_size, self.eps
+                )
             self._cached_weight_key = key
         return self._cached_weight
 
@@ -167,11 +240,33 @@ class BitLinear(nn.Module):
         return module
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.act_quant:
+            x = activation_quant(x, self.eps)
+
+        # Fast path for Internal LoRA (`internal_qat`) with frozen base weight:
+        # factors backward through rank r without computing dense `[d_out, d_in]` grad_W.
+        if (
+            self.use_lora
+            and not self.weight.requires_grad
+            and self.lora_A is not None
+            and self.lora_B is not None
+        ):
+            a = self.lora_dropout(self.lora_A)
+            return _BitLinearInternalLoRASTE.apply(
+                x,
+                self.weight,
+                a,
+                self.lora_B,
+                self.bias,
+                float(self.lora_scaling),
+                self.mode,
+                self.group_size,
+                self.eps,
+            )
+
         # Frozen base weights are common for LoRA-over-QAT-base. Cache their
         # Q2_0/Q1_0 dequantized view instead of recomputing it every forward.
         w_eff = self._fake_quantized_weight()
-        if self.act_quant:
-            x = activation_quant(x, self.eps)
         return F.linear(x, w_eff, self.bias)
 
     @torch.no_grad()

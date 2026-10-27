@@ -5,10 +5,10 @@ Implements:
    Sylvester Walsh-Hadamard block rotation with per-channel sign flipping.
 2. Boolean-mask 2-stage Least-Squares Ternary Quantization (`PQ2_0`, group_size=128)
    matching Prism ML's Ternary-Bonsai-2 GGUF/MLX format bit-for-bit (100.0000% trit match).
-3. Collapsed Identity Jacobian STE (`T^-1 o I_STE o T = I`) eliminating all Hadamard
-   transforms from the backward pass when `store_rotated=False`.
-4. Full support for `full_weight`, `internal_qat` (LoRA inside the Hadamard + PQ2_0
-   quantizer), and `external_peft` training modes.
+3. Collapsed Identity Jacobian STE (`T^-1 o I_STE o T = I`) with zero-allocation `_STEGate`,
+   eliminating all Hadamard transforms and temporary elementwise buffers from the backward pass.
+4. Factored Low-Rank Backward (`_BS2InternalLoRALinearSTE`) for `internal_qat`, eliminating the
+   dense `[out_features, in_features]` weight-gradient GEMM when base weights are frozen.
 """
 
 from __future__ import annotations
@@ -25,6 +25,18 @@ from safetensors.torch import load_file, save_file
 
 # Per-device cache of normalized Sylvester Hadamard matrices: (size, device) -> Tensor[size, size]
 _HADAMARD_CACHE: dict[tuple[int, torch.device], torch.Tensor] = {}
+
+
+class _STEGate(torch.autograd.Function):
+    """Zero-allocation Straight-Through Estimator gate: forward returns `w_q`, backward passes `grad_output` to `w`."""
+
+    @staticmethod
+    def forward(ctx, w: torch.Tensor, w_q: torch.Tensor) -> torch.Tensor:
+        return w_q
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return grad_output, None
 
 
 def _get_hadamard_matrix(size: int, device: torch.device) -> torch.Tensor:
@@ -61,10 +73,11 @@ def _fwht_core_no_grad(
     block: int,
     signs: torch.Tensor,
     inverse: bool = False,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Fast Sylvester Walsh-Hadamard transform with sign vector (no autograd graph)."""
     orig_shape = x.shape
-    orig_dtype = x.dtype
+    target_dtype = out_dtype if out_dtype is not None else x.dtype
     if orig_shape[-1] % block != 0:
         raise ValueError(f"Last dim {orig_shape[-1]} is not divisible by block={block}")
 
@@ -87,7 +100,7 @@ def _fwht_core_no_grad(
     if inverse:
         out_f32 = out_f32 * s_f32
 
-    return out_f32.to(orig_dtype)
+    return out_f32.to(target_dtype) if out_f32.dtype != target_dtype else out_f32
 
 
 class _FWHTAutogradFunc(torch.autograd.Function):
@@ -168,6 +181,116 @@ def ternary_quantize_pq2_0_no_grad(
     w_hat_hard = (q_hard * scales_f32).reshape(rows, width)
 
     return w_hat_hard, q_hard.to(torch.int8), scales_fp16.squeeze(-1)
+
+
+class _BS2InternalLoRALinearSTE(torch.autograd.Function):
+    """Fused Internal-LoRA QAT Linear with rank-r factored backward.
+
+    When the base weight `W_0` is frozen (`requires_grad=False`) and only `lora_A` `[r, d_in]`
+    and `lora_B` `[d_out, r]` are trained, standard `F.linear(x, w_hat)` unconditionally computes
+    the full dense `[d_out, d_in]` gradient matrix `grad_W = grad_Y^T @ X` only to multiply it
+    by `A^T` and `B^T` and discard `grad_W`.
+    This function factors the backward through rank `r`:
+        grad_B = scaling * grad_Y^T @ (X @ A^T)
+        grad_A = scaling * (grad_Y @ B)^T @ X
+    cutting backward GEMM FLOPs by ~50% and eliminating the `[d_out, d_in]` grad_W allocation.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x_in: torch.Tensor,
+        weight: torch.Tensor,
+        lora_a: torch.Tensor,
+        lora_B: torch.Tensor,
+        bias: torch.Tensor | None,
+        signs: torch.Tensor,
+        block_size: int,
+        group_size: int,
+        lora_scaling: float,
+        store_rotated: bool,
+        quant_enabled: bool,
+    ) -> torch.Tensor:
+        delta = torch.matmul(lora_B.to(torch.float32), lora_a.to(torch.float32)) * lora_scaling
+        w_eff = weight + delta.to(weight.dtype)
+
+        if not quant_enabled:
+            w_hat = w_eff.to(x_in.dtype)
+        elif not store_rotated:
+            w_rot = (
+                _fwht_core_no_grad(w_eff, block_size, signs, inverse=False, out_dtype=torch.float32)
+                if block_size > 0
+                else w_eff.to(torch.float32)
+            )
+            w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_rot, group_size)
+            w_hat = (
+                _fwht_core_no_grad(w_hat_rot_hard, block_size, signs, inverse=True, out_dtype=x_in.dtype)
+                if block_size > 0
+                else w_hat_rot_hard.to(x_in.dtype)
+            )
+        else:
+            w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_eff, group_size)
+            w_hat = w_hat_rot_hard.to(x_in.dtype)
+
+        empty = torch.empty(0, device=x_in.device)
+        need_lora_grad = ctx.needs_input_grad[2] or ctx.needs_input_grad[3]
+        ctx.save_for_backward(
+            x_in if need_lora_grad else empty,
+            w_hat if ctx.needs_input_grad[0] else empty,
+            lora_a if ctx.needs_input_grad[3] else empty,
+            lora_B if ctx.needs_input_grad[2] else empty,
+        )
+        ctx.lora_scaling = lora_scaling
+        ctx.has_bias = bias is not None
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+
+        bias_cast = bias.to(x_in.dtype) if (bias is not None and bias.dtype != x_in.dtype) else bias
+        return F.linear(x_in, w_hat, bias_cast)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        x_in, w_hat, lora_a, lora_B = ctx.saved_tensors
+        lora_scaling = ctx.lora_scaling
+        compute_dtype = grad_output.dtype
+        grad_out_2d = grad_output.reshape(-1, grad_output.shape[-1])
+
+        grad_x = grad_lora_a = grad_lora_B = grad_bias = None
+
+        if ctx.needs_input_grad[0]:
+            w_in = w_hat.to(compute_dtype) if w_hat.dtype != compute_dtype else w_hat
+            grad_x = torch.matmul(grad_out_2d, w_in).reshape(grad_output.shape[:-1] + (w_in.shape[1],))
+
+        if ctx.needs_input_grad[2] or ctx.needs_input_grad[3]:
+            x_2d = x_in.reshape(-1, x_in.shape[-1])
+            if x_2d.dtype != compute_dtype:
+                x_2d = x_2d.to(compute_dtype)
+            if ctx.needs_input_grad[2]:
+                # grad_lora_a = scaling * (grad_out_2d @ lora_B)^T @ x_2d -> [r, d_in] (uses BF16 Tensor Cores)
+                b_cast = lora_B.to(compute_dtype) if lora_B.dtype != compute_dtype else lora_B
+                gb = torch.matmul(grad_out_2d, b_cast)
+                grad_lora_a = (torch.matmul(gb.t(), x_2d).to(torch.float32) * lora_scaling).to(lora_a.dtype)
+            if ctx.needs_input_grad[3]:
+                # grad_lora_B = scaling * grad_out_2d^T @ (x_2d @ lora_a^T) -> [d_out, r] (uses BF16 Tensor Cores)
+                a_cast = lora_a.to(compute_dtype) if lora_a.dtype != compute_dtype else lora_a
+                xa = torch.matmul(x_2d, a_cast.t())
+                grad_lora_B = (torch.matmul(grad_out_2d.t(), xa).to(torch.float32) * lora_scaling).to(lora_B.dtype)
+
+        if ctx.has_bias and ctx.needs_input_grad[4]:
+            grad_bias = grad_out_2d.sum(dim=0).to(ctx.bias_dtype)
+
+        return (
+            grad_x,
+            None,
+            grad_lora_a,
+            grad_lora_B,
+            grad_bias,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class Bonsai2LinearFakeQuant(nn.Module):
@@ -258,6 +381,34 @@ class Bonsai2LinearFakeQuant(nn.Module):
         return self.weight + delta.to(self.weight.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Fast path for Internal LoRA (`internal_qat`) with frozen base weight:
+        # uses rank-r factored backward without allocating or computing dense `[d_out, d_in]` grad_W.
+        if (
+            self.use_lora
+            and not self.weight.requires_grad
+            and self.lora_A is not None
+            and self.lora_B is not None
+        ):
+            x_in = (
+                fwht_fast(x, self.block_size, self.signs, inverse=False)
+                if (self.store_rotated and self.block_size > 0)
+                else x
+            )
+            lora_a = self.lora_dropout(self.lora_A)
+            return _BS2InternalLoRALinearSTE.apply(
+                x_in,
+                self.weight,
+                lora_a,
+                self.lora_B,
+                self.bias,
+                self.signs,
+                self.block_size,
+                self.group_size,
+                self.lora_scaling,
+                self.store_rotated,
+                self.quant_enabled,
+            )
+
         w_eff = self._compute_effective_weight()
 
         if not self.quant_enabled:
@@ -271,18 +422,22 @@ class Bonsai2LinearFakeQuant(nn.Module):
             # Collapsed Identity Jacobian: T^-1 o I_STE o T = I => grad_w_eff == grad_w_hat
             with torch.no_grad():
                 w_rot = (
-                    _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False)
+                    _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False, out_dtype=torch.float32)
                     if self.block_size > 0
                     else w_eff.to(torch.float32)
                 )
                 w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_rot, self.group_size)
                 w_hat_hard = (
-                    _fwht_core_no_grad(w_hat_rot_hard, self.block_size, self.signs, inverse=True)
+                    _fwht_core_no_grad(w_hat_rot_hard, self.block_size, self.signs, inverse=True, out_dtype=w_eff.dtype)
                     if self.block_size > 0
-                    else w_hat_rot_hard
-                ).to(w_eff.dtype)
+                    else w_hat_rot_hard.to(w_eff.dtype)
+                )
 
-            w_hat = w_eff + (w_hat_hard - w_eff).detach()
+            w_hat = (
+                _STEGate.apply(w_eff, w_hat_hard)
+                if (torch.is_grad_enabled() and w_eff.requires_grad)
+                else w_hat_hard
+            )
             return F.linear(x, w_hat.to(x.dtype), self.bias)
         else:
             # Mode 2: Master weights stored directly in rotated Hadamard domain.
@@ -290,7 +445,11 @@ class Bonsai2LinearFakeQuant(nn.Module):
                 w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_eff, self.group_size)
                 w_hat_rot_hard = w_hat_rot_hard.to(w_eff.dtype)
 
-            w_hat_rot = w_eff + (w_hat_rot_hard - w_eff).detach()
+            w_hat_rot = (
+                _STEGate.apply(w_eff, w_hat_rot_hard)
+                if (torch.is_grad_enabled() and w_eff.requires_grad)
+                else w_hat_rot_hard
+            )
             x_rot = (
                 fwht_fast(x, self.block_size, self.signs, inverse=False)
                 if self.block_size > 0
@@ -354,16 +513,16 @@ class Bonsai2LinearFakeQuant(nn.Module):
             self.train()
 
         w_rot = (
-            _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False)
+            _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False, out_dtype=torch.float32)
             if (not self.store_rotated and self.block_size > 0)
             else w_eff.to(torch.float32)
         )
         w_hat_rot, _, _ = ternary_quantize_pq2_0_no_grad(w_rot, self.group_size)
         w_unfolded = (
-            _fwht_core_no_grad(w_hat_rot, self.block_size, self.signs, inverse=True)
+            _fwht_core_no_grad(w_hat_rot, self.block_size, self.signs, inverse=True, out_dtype=self.weight.dtype)
             if self.block_size > 0
-            else w_hat_rot
-        ).to(self.weight.dtype)
+            else w_hat_rot.to(self.weight.dtype)
+        )
 
         linear = nn.Linear(
             in_features=self.in_features,
@@ -387,7 +546,7 @@ class Bonsai2LinearFakeQuant(nn.Module):
             self.train()
 
         w_rot = (
-            _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False)
+            _fwht_core_no_grad(w_eff, self.block_size, self.signs, inverse=False, out_dtype=torch.float32)
             if (not self.store_rotated and self.block_size > 0)
             else w_eff.to(torch.float32)
         )

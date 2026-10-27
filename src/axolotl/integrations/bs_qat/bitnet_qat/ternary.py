@@ -43,7 +43,6 @@ def _padded_in_features(in_features: int, group_size: int) -> int:
     return in_features if rem == 0 else in_features + (group_size - rem)
 
 
-
 def quantize_ternary(
     w: torch.Tensor,
     group_size: int = DEFAULT_GROUP_SIZE,
@@ -70,19 +69,6 @@ def quantize_ternary(
     n_groups = in_padded // group_size
 
     wg = w_pad.reshape(out_features, n_groups, group_size).to(torch.float32)
-    # --- Previous absmax implementation (kept for reference, superseded below) ---
-    # scale = wg.abs().amax(dim=-1, keepdim=True).clamp(min=eps)  # (out, n_groups, 1)
-    # if fp16_scale:
-    #     # The deployed Q2_0 container stores the group scale in fp16; round here
-    #     # so codes (and the dequantized weights) match inference bit-for-bit.
-    #     scale = scale.to(torch.float16).to(torch.float32)
-    # codes = torch.round(wg / scale).clamp_(-1, 1).to(torch.int8)
-
-    # --- John's fix: divide by the unrounded fp32 amax (not the fp16-stored scale)
-    # and round half-away-from-zero. This is what llama.cpp's own ternary quantizer
-    # does; matching it bit-for-bit here matters more than matching the stored scale
-    # used for dequantization (torch.round above rounds half-to-even, which diverges
-    # from llama.cpp's roundf-style half-away-from-zero on exact .5 boundaries). ---
     amax = wg.abs().amax(dim=-1, keepdim=True)
     inv = torch.where(amax > 0.0, 1.0 / amax, 0.0)
     scale = amax.to(torch.float16).to(torch.float32) if fp16_scale else amax.clamp(min=eps)
@@ -206,15 +192,67 @@ dequantize = dequantize_ternary
 dequantize_binary = dequantize_ternary
 
 
+@torch.no_grad()
+def _fake_quantize_dequantize_no_grad(
+    w: torch.Tensor,
+    mode: str = MODE_TERNARY,
+    group_size: int = DEFAULT_GROUP_SIZE,
+    eps: float = EPS,
+    fp16_scale: bool = True,
+) -> torch.Tensor:
+    """Fused quantize-dequantize without intermediate ``float32 -> int8 -> float32`` casts."""
+    out_features, in_features = w.shape
+    orig_dtype = w.dtype
+
+    if mode == MODE_TERNARY:
+        in_padded = _padded_in_features(in_features, group_size)
+        w_pad = w if in_padded == in_features else F.pad(w, (0, in_padded - in_features))
+        n_groups = in_padded // group_size
+        wg = w_pad.reshape(out_features, n_groups, group_size).to(torch.float32)
+        amax = wg.abs().amax(dim=-1, keepdim=True)
+        inv = torch.where(amax > 0.0, 1.0 / amax, 0.0)
+        scale = amax.to(torch.float16).to(torch.float32) if fp16_scale else amax.clamp(min=eps)
+        x = wg * inv
+        codes_f32 = torch.where(x >= 0, torch.floor(x + 0.5), torch.ceil(x - 0.5)).clamp_(-1.0, 1.0)
+        wq = (codes_f32 * scale).reshape(out_features, in_padded)
+        if in_padded != in_features:
+            wq = wq[:, :in_features].contiguous()
+        return wq.to(orig_dtype)
+
+    if mode == MODE_BINARY:
+        in_padded = _padded_in_features(in_features, group_size)
+        w_pad = w if in_padded == in_features else F.pad(w, (0, in_padded - in_features))
+        n_groups = in_padded // group_size
+        wg = w_pad.reshape(out_features, n_groups, group_size).to(torch.float32)
+        scale = wg.abs().mean(dim=-1, keepdim=True).clamp(min=eps)
+        if fp16_scale:
+            scale = scale.to(torch.float16).to(torch.float32)
+        wq = torch.where(wg >= 0, scale, -scale).reshape(out_features, in_padded)
+        if in_padded != in_features:
+            wq = wq[:, :in_features].contiguous()
+        return wq.to(orig_dtype)
+
+    if mode == MODE_INT4:
+        if in_features % group_size != 0:
+            raise ValueError(f"in_features={in_features} not divisible by group_size={group_size}")
+        wg = w.reshape(out_features, in_features // group_size, group_size).to(torch.float32)
+        amax = wg.abs().amax(dim=-1, keepdim=True)
+        scale = (amax / ((INT4_QMAX - INT4_QMIN) / 2)).to(torch.bfloat16).to(torch.float32)
+        scale = scale.clamp(min=torch.finfo(torch.bfloat16).tiny)
+        codes_f32 = torch.round(wg / scale).clamp_(INT4_QMIN, INT4_QMAX)
+        return (codes_f32 * scale).reshape(out_features, in_features).to(orig_dtype)
+
+    raise ValueError(f"unknown quant mode {mode!r}; expected one of {QUANT_MODES}")
+
+
 class _FakeQuantSTE(torch.autograd.Function):
-    """Forward = group-wise fake-quant (binary/ternary); backward = identity (STE)."""
+    """Forward = group-wise fake-quant (binary/ternary/int4); backward = identity (STE)."""
 
     @staticmethod
     def forward(
         ctx, w: torch.Tensor, mode: str, group_size: int, eps: float, fp16_scale: bool
     ) -> torch.Tensor:
-        codes, scales = quantize(w, mode, group_size, eps, fp16_scale)
-        return dequantize(codes, scales, group_size).to(w.dtype)
+        return _fake_quantize_dequantize_no_grad(w, mode, group_size, eps, fp16_scale)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -230,6 +268,8 @@ def fake_quantize(
     fp16_scale: bool = True,
 ) -> torch.Tensor:
     """Differentiable group-wise fake-quant (STE). Returns dequantized weights."""
+    if not torch.is_grad_enabled() or not w.requires_grad:
+        return _fake_quantize_dequantize_no_grad(w, mode, group_size, eps, fp16_scale)
     return _FakeQuantSTE.apply(w, mode, group_size, eps, fp16_scale)
 
 
@@ -240,7 +280,7 @@ def fake_quantize_ternary(
     fp16_scale: bool = True,
 ) -> torch.Tensor:
     """Differentiable ternary fake-quant (STE). Returns dequantized weights."""
-    return _FakeQuantSTE.apply(w, MODE_TERNARY, group_size, eps, fp16_scale)
+    return fake_quantize(w, MODE_TERNARY, group_size, eps, fp16_scale)
 
 
 def fake_quantize_binary(
@@ -250,7 +290,7 @@ def fake_quantize_binary(
     fp16_scale: bool = True,
 ) -> torch.Tensor:
     """Differentiable 1-bit binary fake-quant (STE). Returns dequantized weights."""
-    return _FakeQuantSTE.apply(w, MODE_BINARY, group_size, eps, fp16_scale)
+    return fake_quantize(w, MODE_BINARY, group_size, eps, fp16_scale)
 
 
 class _ActQuantSTE(torch.autograd.Function):
@@ -258,8 +298,9 @@ class _ActQuantSTE(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, eps: float) -> torch.Tensor:
-        scale = 127.0 / x.abs().amax(dim=-1, keepdim=True).clamp(min=eps)
-        return (torch.round(x * scale).clamp(-128, 127) / scale).to(x.dtype)
+        x_f32 = x.to(torch.float32)
+        scale = 127.0 / x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=eps)
+        return (torch.round(x_f32 * scale).clamp_(-128, 127) / scale).to(x.dtype)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
@@ -268,6 +309,11 @@ class _ActQuantSTE(torch.autograd.Function):
 
 def activation_quant(x: torch.Tensor, eps: float = EPS) -> torch.Tensor:
     """Optional 8-bit activation fake-quant (off by default; Bonsai is weight-only)."""
+    if not torch.is_grad_enabled() or not x.requires_grad:
+        with torch.no_grad():
+            x_f32 = x.to(torch.float32)
+            scale = 127.0 / x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=eps)
+            return (torch.round(x_f32 * scale).clamp_(-128, 127) / scale).to(x.dtype)
     return _ActQuantSTE.apply(x, eps)
 
 
