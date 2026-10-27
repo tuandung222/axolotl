@@ -262,3 +262,42 @@ def test_bs2_qat_plugin_patching_and_skip_rules():
         assert False, "Expected ValueError when adapter='lora' with internal_qat"
     except ValueError:
         pass
+
+
+def test_frozen_weight_cache_and_bf16_ste_grid_parity():
+    dev = _device()
+    torch.manual_seed(2026)
+    in_features, out_features, block_size = 512, 256, 512
+    signs = get_signs_for_width(in_features, seed=19, device=dev)
+
+    base_linear = nn.Linear(in_features, out_features, bias=False, device=dev, dtype=torch.bfloat16)
+    layer = Bonsai2LinearFakeQuant.from_linear(
+        base_linear, block_size=block_size, signs=signs, use_lora=False
+    )
+    # 1. Verify _STEGate in BF16 matches quantized inference weight 100.0000% (no BF16 w + (wq - w) drift)
+    x = torch.randn(2, 8, in_features, device=dev, dtype=torch.bfloat16)
+    y_train = layer(x)
+    snapped_linear = layer.to_standard_linear()
+    y_infer = snapped_linear(x)
+    assert torch.equal(y_train, y_infer)
+
+    # 2. Verify frozen-weight cache populates when weight.requires_grad is False and invalidates on clear/mutate
+    layer.weight.requires_grad_(False)
+    assert layer._cached_weight is None
+    y_cached_1 = layer(x)
+    assert layer._cached_weight is not None
+    cached_ref = layer._cached_weight
+    y_cached_2 = layer(x)
+    assert layer._cached_weight is cached_ref
+    assert torch.equal(y_cached_1, y_cached_2)
+
+    # Mutating weight in-place bumps _version and invalidates cache automatically
+    with torch.no_grad():
+        layer.weight.mul_(-1.0)
+    y_mutated = layer(x)
+    assert layer._cached_weight is not cached_ref
+    assert torch.allclose(y_mutated, -y_cached_1, atol=1e-3, rtol=1e-3)
+
+    layer.clear_weight_cache()
+    assert layer._cached_weight is None
+

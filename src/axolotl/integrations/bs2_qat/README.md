@@ -22,9 +22,12 @@ For an unfolded weight matrix $W \in \mathbb{R}^{d_{\text{out}} \times d_{\text{
 
 3. **Inverse Hadamard Unfolding ($\mathcal{T}^{-1}$) & Collapsed Identity Jacobian STE:**
    $$\hat{W}_{\text{hard}} = \mathcal{T}^{-1}\big(s_{\text{fp16}} \cdot \mathbf{q}_{\text{hard}}\big) = \big((s_{\text{fp16}} \cdot \mathbf{q}_{\text{hard}}) \mathcal{H}_B\big) \odot \mathbf{s}$$
-   Because $\mathcal{T}$ and $\mathcal{T}^{-1}$ are orthogonal inverses ($\mathcal{T}^{-1} \circ \mathcal{I}_{\text{STE}} \circ \mathcal{T} = \mathcal{I}$), the entire forward rotation $\to$ quantization $\to$ inverse rotation runs inside `torch.no_grad()`, and the Straight-Through Estimator is attached in one outer operation:
-   $$\hat{W} = W_{\text{eff}} + \operatorname{stop\_grad}\!\big(\hat{W}_{\text{hard}} - W_{\text{eff}}\big)$$
-   This eliminates **100% of Hadamard transforms from the backward pass** and saves **~180 MB of Autograd VRAM per layer**.
+   Because $\mathcal{T}$ and $\mathcal{T}^{-1}$ are orthogonal inverses ($\mathcal{T}^{-1} \circ \mathcal{I}_{\text{STE}} \circ \mathcal{T} = \mathcal{I}$), the entire forward rotation $\to$ quantization $\to$ inverse rotation runs inside `torch.no_grad()`, and the Straight-Through Estimator is attached via a zero-allocation `torch.autograd.Function` (`_STEGate.apply(w, w_hard)`):
+   - Eliminates **100% of Hadamard transforms from the backward pass** and saves **~180 MB of Autograd VRAM per layer**.
+   - Avoids `bfloat16` `w + (wq - w).detach()` floating-point cancellation, achieving **100.0000% bit-exact parity** between training forward outputs and snapped inference weights.
+   - During training, `_ternary_dequant_pq2_0_no_grad` performs in-place `.round_().clamp_().mul_()` without materializing temporary `int8` tensors.
+   - In `internal_qat` mode (`use_lora=True`, `weight.requires_grad=False`), `_BS2InternalLoRALinearSTE` computes the merged weight via fused cuBLAS `torch.addmm` and factors the backward pass directly through rank $r$ (`[T, r]`) on BF16 Tensor Cores without materializing the dense `[d_out, d_in]` weight gradient ($\text{1.23}\times$ speedup and $-24.5\text{ MB}$ peak VRAM per layer on H100).
+   - In `external_peft` or `eval()` mode (`use_lora=False`, `weight.requires_grad=False`), `Bonsai2LinearFakeQuant` caches the fake-quantized weight tensor across steps using `weight._version` tracking.
 
 ---
 

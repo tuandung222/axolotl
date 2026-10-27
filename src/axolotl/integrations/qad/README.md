@@ -201,3 +201,18 @@ Chạm giới hạn 1024 token: BF16 4, PTQ 5, QAD 7. Chưa chạy fidelity cho 
 2. Thử scale học được (LSQ, khởi tạo từ scale PTQ) và LR 1e-4.
 3. Thử top-10 `renorm` hoặc KL toàn vocab + trọng số tăng cho token khó.
 4. Nhân rộng sang 9B / r32 / r128 nếu 4B r64 xác nhận có ích.
+
+---
+
+## 11. Tối ưu hóa tính toán Forward & Backward trên GPU (`fixed_scale_fq.py` & `kl.py`)
+
+1. **Zero-Allocation `_STEGate` & `@torch.no_grad()` trong `fake_quant`**:
+   - Thực thi toàn bộ phép chia scale, làm tròn `round()`, kẹp `clamp(-8, 7)` và nhân lại với scale bên trong `@torch.no_grad()`, sau đó gắn gradient STE bằng `torch.autograd.Function` `_STEGate.apply(w, w_q)` (0 kernel phụ, 0 byte cấp phát thêm, loại bỏ hoàn toàn sai số triệt tiêu dấu phẩy động `bfloat16` của biểu thức `w + (wq - w).detach()`).
+   - Hàm `apply_fixed_scale_fq` gọi `scale.detach().to(...)` khi đăng ký buffer `fq_scale`, ngăn lỗi giữ đồ thị autograd cũ nếu `scale` được tính từ trọng số có `requires_grad=True`.
+2. **Fused `torch.addmm` + Lượng tử hóa tại chỗ (In-place) + Rank-$r$ Factored Backward (`_FQLoRALinearSTE`)**:
+   - Ở chế độ `qad_internal_lora: true` (`FQLoRALinear`), chiều forward gộp trọng số bằng một lời gọi cuBLAS `v = torch.addmm(weight.float(), lora_B.float(), lora_A.float(), alpha=lora_scale)` duy nhất và lượng tử hóa 100% in-place (`vg.div_(s).round_().clamp_(QMIN, QMAX).mul_(s)`).
+   - Chiều backward chiếu trực tiếp `grad_output` qua `lora_B` (`[T, r]`) để tính `grad_lora_A` và `grad_lora_B` trên BF16 Tensor Cores mà không cần dựng ma trận dày `grad_W` kích thước `[d_out, d_in]` (**tăng tốc 1.45x** từ `4.777 ms` xuống `3.284 ms` và **giảm 168.5 MB VRAM đỉnh** mỗi lớp trên H100 ở cấu hình `T=4096, 6144x2048, r=16`).
+3. **Loại bỏ `F.log_softmax` toàn từ vựng dư thừa ở chế độ `qad_topk_mode: "renorm"` (`kl.py`)**:
+   - Do tính bất biến dịch (shift invariance) của hàm softmax, việc lấy `log_softmax` trên top-$k$ logits cho kết quả giống hệt lấy `log_softmax` trên toàn bộ từ vựng $V$ rồi mới lấy `log_softmax` lại trên $k$ phần tử.
+   - Nhờ bỏ 2 lần gọi `F.log_softmax` kích thước `[chunk_tokens, V]` khi `topk_mode == "renorm"` và chuyển sang `F.kl_div(..., log_target=True)`, mức tiêu thụ VRAM đỉnh của hàm loss giảm **885.0 MB** (`1779.7 MB -> 894.8 MB`) tại $V=151,936, C=1024$.
+   - Xem tài liệu chi tiết tại [`docs/qat_plugins/03_qad_distillation.md`](../../../../docs/qat_plugins/03_qad_distillation.md).

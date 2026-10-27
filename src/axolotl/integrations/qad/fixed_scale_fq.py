@@ -32,7 +32,7 @@ def _fake_quant_no_grad(w: torch.Tensor, scale: torch.Tensor, group_size: int) -
     out_f, in_f = w.shape
     wg = w.float().view(out_f, in_f // group_size, group_size)
     s = scale.float().unsqueeze(-1).clamp_min(torch.finfo(torch.float32).tiny)
-    return (torch.clamp(torch.round(wg / s), QMIN, QMAX) * s).view(out_f, in_f).to(w.dtype)
+    return (wg / s).round_().clamp_(QMIN, QMAX).mul_(s).view(out_f, in_f).to(w.dtype)
 
 
 def fake_quant(w: torch.Tensor, scale: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -74,12 +74,12 @@ class _FQLoRALinearSTE(torch.autograd.Function):
         lora_scale: float,
         group_size: int,
     ) -> torch.Tensor:
-        delta = (lora_B.float() @ lora_A.float()) * lora_scale
-        v = weight.float() + delta
+        v = torch.addmm(weight.float(), lora_B.float(), lora_A.float(), alpha=lora_scale)
         out_f, in_f = v.shape
         s = fq_scale.float().unsqueeze(-1).clamp_min(torch.finfo(torch.float32).tiny)
         vg = v.view(out_f, in_f // group_size, group_size)
-        w = (torch.clamp(torch.round(vg / s), QMIN, QMAX) * s).view(out_f, in_f).to(weight.dtype)
+        vg.div_(s).round_().clamp_(QMIN, QMAX).mul_(s)
+        w = v.to(weight.dtype)
 
         empty = torch.empty(0, device=x.device)
         need_lora_grad = ctx.needs_input_grad[2] or ctx.needs_input_grad[3]

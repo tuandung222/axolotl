@@ -214,7 +214,7 @@ def _fake_quantize_dequantize_no_grad(
         scale = amax.to(torch.float16).to(torch.float32) if fp16_scale else amax.clamp(min=eps)
         x = wg * inv
         codes_f32 = torch.where(x >= 0, torch.floor(x + 0.5), torch.ceil(x - 0.5)).clamp_(-1.0, 1.0)
-        wq = (codes_f32 * scale).reshape(out_features, in_padded)
+        wq = codes_f32.mul_(scale).reshape(out_features, in_padded)
         if in_padded != in_features:
             wq = wq[:, :in_features].contiguous()
         return wq.to(orig_dtype)
@@ -239,8 +239,8 @@ def _fake_quantize_dequantize_no_grad(
         amax = wg.abs().amax(dim=-1, keepdim=True)
         scale = (amax / ((INT4_QMAX - INT4_QMIN) / 2)).to(torch.bfloat16).to(torch.float32)
         scale = scale.clamp(min=torch.finfo(torch.bfloat16).tiny)
-        codes_f32 = torch.round(wg / scale).clamp_(INT4_QMIN, INT4_QMAX)
-        return (codes_f32 * scale).reshape(out_features, in_features).to(orig_dtype)
+        codes_f32 = (wg / scale).round_().clamp_(INT4_QMIN, INT4_QMAX).mul_(scale)
+        return codes_f32.reshape(out_features, in_features).to(orig_dtype)
 
     raise ValueError(f"unknown quant mode {mode!r}; expected one of {QUANT_MODES}")
 

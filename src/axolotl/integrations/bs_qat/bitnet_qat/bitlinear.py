@@ -47,7 +47,7 @@ class _BitLinearInternalLoRASTE(torch.autograd.Function):
         group_size: int,
         eps: float,
     ) -> torch.Tensor:
-        w = weight.to(torch.float32) + lora_scaling * (lora_B @ lora_a)
+        w = torch.addmm(weight.to(torch.float32), lora_B, lora_a, alpha=lora_scaling)
         if mode == MODE_INT4:
             w = w.to(torch.bfloat16).to(torch.float32)
         w_eff = fake_quantize(w, mode, group_size, eps).to(weight.dtype)

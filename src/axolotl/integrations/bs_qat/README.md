@@ -131,6 +131,13 @@ The practical difference: `external_peft` quantizes `W` alone and adds the
 LoRA delta in full precision afterward; `internal_qat` quantizes `W + LoRA`
 as one tensor, exactly like the single-tensor baked Q2_0 export has to.
 
+### GPU Forward & Backward Optimizations (`bitlinear.py` & `ternary.py`)
+
+- **Fused FP32 Quantize-Dequantize (`_fake_quantize_dequantize_no_grad`)**:
+  During training, `FakeQuantSTE` and `_BitLinearInternalLoRASTE` fuse quantization and dequantization in FP32 using in-place `.round_().clamp_().mul_(scale)` inside `@torch.no_grad()`, eliminating the `float32 -> int8 -> float32` tensor conversion roundtrip on every forward pass.
+- **Fused `torch.addmm` & Rank-$r$ Factored Backward (`_BitLinearInternalLoRASTE`)**:
+  In `internal_qat` mode when `weight.requires_grad` is `False`, forward merges $W + \frac{\alpha}{r} B A$ in a single fused cuBLAS `torch.addmm` call, and backward factors the LoRA gradients `grad_lora_A` and `grad_lora_B` directly through the low-rank bottleneck $r$ (`[T, r]`) on BF16 Tensor Cores without materializing the dense $[d_{\text{out}}, d_{\text{in}}]$ weight gradient $\nabla_{\hat{W}} \mathcal{L} = (\nabla_Y \mathcal{L})^\top X$ (**1.33x faster** forward+backward and **-48.5 MB** peak VRAM per layer on H100 at $T=4096, 6144 \times 2048, r=16$).
+
 Internal-QAT LoRA hyperparameters (`bs_qat_lora_r/alpha/dropout`) fall
 back to the corresponding top-level `lora_r/lora_alpha/lora_dropout` keys when
 unset, so an existing external_peft config can switch modes with minimal

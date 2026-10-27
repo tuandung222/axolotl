@@ -81,11 +81,13 @@ def _fwht_core_no_grad(
     if orig_shape[-1] % block != 0:
         raise ValueError(f"Last dim {orig_shape[-1]} is not divisible by block={block}")
 
-    x_f32 = x.to(torch.float32)
-    s_f32 = signs.to(device=x.device, dtype=torch.float32)
+    s_f32 = signs if (signs.device == x.device and signs.dtype == torch.float32) else signs.to(device=x.device, dtype=torch.float32)
 
     if not inverse:
-        x_f32 = x_f32 * s_f32
+        # Single fused (bf16 * fp32 -> fp32) kernel & allocation instead of separate .to(fp32) + mul
+        x_f32 = x * s_f32
+    else:
+        x_f32 = x.to(torch.float32) if x.dtype != torch.float32 else x
 
     if block <= 512:
         h_mat = _get_hadamard_matrix(block, x.device)
@@ -98,7 +100,7 @@ def _fwht_core_no_grad(
         out_f32 = torch.matmul(h1, torch.matmul(v, h2)).reshape(orig_shape)
 
     if inverse:
-        out_f32 = out_f32 * s_f32
+        out_f32.mul_(s_f32)
 
     return out_f32.to(target_dtype) if out_f32.dtype != target_dtype else out_f32
 
@@ -144,6 +146,30 @@ def fwht_fast(
 
 
 @torch.no_grad()
+def _ternary_dequant_pq2_0_no_grad(
+    w_rot: torch.Tensor,
+    group_size: int = 128,
+) -> torch.Tensor:
+    """Fast training-path PQ2_0 quantize-dequantize without int8 code allocation or full-matrix masks."""
+    rows, width = w_rot.shape
+    if width % group_size != 0:
+        raise ValueError(f"in_features ({width}) must be divisible by group_size ({group_size})")
+
+    w_g = (w_rot.to(torch.float32) if w_rot.dtype != torch.float32 else w_rot).reshape(
+        rows, width // group_size, group_size
+    )
+    w_abs = w_g.abs()
+    s_init = w_abs.amax(dim=-1, keepdim=True)
+    mask = w_abs >= (0.5 * s_init)
+    denom = mask.sum(dim=-1, keepdim=True).clamp_(min=1)
+    scales_f32 = ((w_abs * mask).sum(dim=-1, keepdim=True) / denom).to(torch.float16).to(torch.float32)
+
+    inv_scales = torch.where(scales_f32 > 0, 1.0 / scales_f32, 0.0)
+    q_hard = (w_g * inv_scales).round_().clamp_(-1.0, 1.0)
+    return q_hard.mul_(scales_f32).reshape(rows, width)
+
+
+@torch.no_grad()
 def ternary_quantize_pq2_0_no_grad(
     w_rot: torch.Tensor,
     group_size: int = 128,
@@ -159,28 +185,27 @@ def ternary_quantize_pq2_0_no_grad(
     if width % group_size != 0:
         raise ValueError(f"in_features ({width}) must be divisible by group_size ({group_size})")
 
-    w_g = w_rot.to(torch.float32).reshape(rows, width // group_size, group_size)
+    w_g = (w_rot.to(torch.float32) if w_rot.dtype != torch.float32 else w_rot).reshape(
+        rows, width // group_size, group_size
+    )
 
     # Boolean-mask Least-Squares scale: s* = sum(|w_i| * m_i) / sum(m_i) where m_i = (|w_i| >= 0.5 * amax)
     w_abs = w_g.abs()
     s_init = w_abs.amax(dim=-1, keepdim=True)
-    mask = (w_abs >= (0.5 * s_init)) & (s_init > 0)
-    denom = mask.sum(dim=-1, keepdim=True).clamp(min=1)
+    mask = w_abs >= (0.5 * s_init)
+    denom = mask.sum(dim=-1, keepdim=True).clamp_(min=1)
     scales = (w_abs * mask).sum(dim=-1, keepdim=True) / denom
 
     # Match PQ2_0 / MLX IEEE-754 float16 scale storage (preserve exact 0.0 for all-zero groups)
     scales_fp16 = scales.to(torch.float16)
     scales_f32 = scales_fp16.to(torch.float32)
 
-    safe_scales = torch.where(scales_f32 > 0, scales_f32, torch.ones_like(scales_f32))
-    q_hard = torch.where(
-        scales_f32 > 0,
-        (w_g / safe_scales).round().clamp(-1.0, 1.0),
-        torch.zeros_like(w_g),
-    )
-    w_hat_hard = (q_hard * scales_f32).reshape(rows, width)
+    inv_scales = torch.where(scales_f32 > 0, 1.0 / scales_f32, 0.0)
+    q_hard = (w_g * inv_scales).round_().clamp_(-1.0, 1.0)
+    q_int8 = q_hard.to(torch.int8)
+    w_hat_hard = q_hard.mul_(scales_f32).reshape(rows, width)
 
-    return w_hat_hard, q_hard.to(torch.int8), scales_fp16.squeeze(-1)
+    return w_hat_hard, q_int8, scales_fp16.squeeze(-1)
 
 
 class _BS2InternalLoRALinearSTE(torch.autograd.Function):
@@ -222,14 +247,14 @@ class _BS2InternalLoRALinearSTE(torch.autograd.Function):
                 if block_size > 0
                 else w_eff.to(torch.float32)
             )
-            w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_rot, group_size)
+            w_hat_rot_hard = _ternary_dequant_pq2_0_no_grad(w_rot, group_size)
             w_hat = (
                 _fwht_core_no_grad(w_hat_rot_hard, block_size, signs, inverse=True, out_dtype=x_in.dtype)
                 if block_size > 0
                 else w_hat_rot_hard.to(x_in.dtype)
             )
         else:
-            w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_eff, group_size)
+            w_hat_rot_hard = _ternary_dequant_pq2_0_no_grad(w_eff, group_size)
             w_hat = w_hat_rot_hard.to(x_in.dtype)
 
         empty = torch.empty(0, device=x_in.device)
@@ -330,6 +355,8 @@ class Bonsai2LinearFakeQuant(nn.Module):
         self.group_size = group_size
         self.store_rotated = store_rotated
         self.quant_enabled = True
+        self._cached_weight_key: tuple[torch.device, torch.dtype, int, bool] | None = None
+        self._cached_weight: torch.Tensor | None = None
 
         self.weight = nn.Parameter(
             torch.empty((out_features, in_features), dtype=dtype, device=device)
@@ -372,6 +399,11 @@ class Bonsai2LinearFakeQuant(nn.Module):
             self.register_parameter("lora_A", None)
             self.register_parameter("lora_B", None)
 
+    def clear_weight_cache(self) -> None:
+        """Clear cached fake-quantized base weight (used when base weight is frozen in `external_peft`)."""
+        self._cached_weight_key = None
+        self._cached_weight = None
+
     def _compute_effective_weight(self) -> torch.Tensor:
         """Return `W + (alpha / r) * (B @ A)` when `use_lora=True`, else `W`."""
         if not self.use_lora or self.lora_A is None or self.lora_B is None:
@@ -381,7 +413,7 @@ class Bonsai2LinearFakeQuant(nn.Module):
         return self.weight + delta.to(self.weight.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Fast path for Internal LoRA (`internal_qat`) with frozen base weight:
+        # Fast path 1: Internal LoRA (`internal_qat`) with frozen base weight:
         # uses rank-r factored backward without allocating or computing dense `[d_out, d_in]` grad_W.
         if (
             self.use_lora
@@ -409,6 +441,44 @@ class Bonsai2LinearFakeQuant(nn.Module):
                 self.quant_enabled,
             )
 
+        # Fast path 2: Frozen base weight without internal LoRA (`external_peft` or eval mode):
+        # cache the Hadamard + PQ2_0 quantized weight across forward passes.
+        if not self.use_lora and not self.weight.requires_grad and self.quant_enabled:
+            key = (self.weight.device, self.weight.dtype, self.weight._version, self.store_rotated)
+            if self._cached_weight_key != key or self._cached_weight is None:
+                with torch.no_grad():
+                    if not self.store_rotated:
+                        w_rot = (
+                            _fwht_core_no_grad(
+                                self.weight, self.block_size, self.signs, inverse=False, out_dtype=torch.float32
+                            )
+                            if self.block_size > 0
+                            else self.weight.to(torch.float32)
+                        )
+                        w_hat_rot_hard = _ternary_dequant_pq2_0_no_grad(w_rot, self.group_size)
+                        self._cached_weight = (
+                            _fwht_core_no_grad(
+                                w_hat_rot_hard,
+                                self.block_size,
+                                self.signs,
+                                inverse=True,
+                                out_dtype=self.weight.dtype,
+                            )
+                            if self.block_size > 0
+                            else w_hat_rot_hard.to(self.weight.dtype)
+                        )
+                    else:
+                        self._cached_weight = _ternary_dequant_pq2_0_no_grad(
+                            self.weight, self.group_size
+                        ).to(self.weight.dtype)
+                self._cached_weight_key = key
+            x_in = (
+                fwht_fast(x, self.block_size, self.signs, inverse=False)
+                if (self.store_rotated and self.block_size > 0)
+                else x
+            )
+            return F.linear(x_in, self._cached_weight.to(x_in.dtype), self.bias)
+
         w_eff = self._compute_effective_weight()
 
         if not self.quant_enabled:
@@ -426,7 +496,7 @@ class Bonsai2LinearFakeQuant(nn.Module):
                     if self.block_size > 0
                     else w_eff.to(torch.float32)
                 )
-                w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_rot, self.group_size)
+                w_hat_rot_hard = _ternary_dequant_pq2_0_no_grad(w_rot, self.group_size)
                 w_hat_hard = (
                     _fwht_core_no_grad(w_hat_rot_hard, self.block_size, self.signs, inverse=True, out_dtype=w_eff.dtype)
                     if self.block_size > 0
@@ -442,8 +512,7 @@ class Bonsai2LinearFakeQuant(nn.Module):
         else:
             # Mode 2: Master weights stored directly in rotated Hadamard domain.
             with torch.no_grad():
-                w_hat_rot_hard, _, _ = ternary_quantize_pq2_0_no_grad(w_eff, self.group_size)
-                w_hat_rot_hard = w_hat_rot_hard.to(w_eff.dtype)
+                w_hat_rot_hard = _ternary_dequant_pq2_0_no_grad(w_eff, self.group_size).to(w_eff.dtype)
 
             w_hat_rot = (
                 _STEGate.apply(w_eff, w_hat_rot_hard)

@@ -28,10 +28,34 @@
 </p>
 
 
+<details open>
+<summary><h2 style="display:inline">Fork Additions: Low-Bit QAT & QAD Plugin Suite & GPU Optimizations</h2></summary>
+
+This fork adds four low-bit Quantization-Aware Training (QAT) and Quantization-Aware Distillation (QAD) plugins under `src/axolotl/integrations/`, accompanied by dedicated technical documentation in [`docs/qat_plugins/`](docs/qat_plugins/README.md):
+
+1. **[`bs2_qat`](docs/qat_plugins/01_bs2_qat_bonsai2_hadamard.md)** ([`src/axolotl/integrations/bs2_qat/`](src/axolotl/integrations/bs2_qat/README.md)): Block-wise Sylvester Walsh-Hadamard rotation + `PQ2_0` (`group_size=128`) least-squares ternary QAT for **`Ternary-Bonsai-2-{2B, 4B, 9B, 27B}`** (`Qwen3.5`).
+2. **[`bs_qat`](docs/qat_plugins/02_bs_qat_bitlinear.md)** ([`src/axolotl/integrations/bs_qat/`](src/axolotl/integrations/bs_qat/README.md)): `BitLinear` group-wise fake-quant QAT (`ternary` `Q2_0`, `binary` `Q1_0`, and symmetric `int4` `W4A16`) for **`Ternary-Bonsai-4B`** and general decoder LLMs.
+3. **[`qad`](docs/qat_plugins/03_qad_distillation.md)** ([`src/axolotl/integrations/qad/`](src/axolotl/integrations/qad/README.md)): Fixed-scale & LSQ symmetric `INT4` (`W4A16`, `group_size=128`) Quantization-Aware Distillation initialized from `compressed-tensors` PTQ/GPTQ checkpoints with chunked KL divergence loss.
+4. **[`llama_cpp_qat`](docs/qat_plugins/04_llama_cpp_qat_onebitllms.md)** ([`src/axolotl/integrations/llama_cpp_qat/`](src/axolotl/integrations/llama_cpp_qat/README.md)): Bit-exact `ggml-quants.c` (`Q1_0`, `Q2_0`, `Q4_0`, `Q4_1`, `Q8_0`, `Q8_1`) block fake-quant QAT powered by `onebitllms`.
+
+### H100 Forward + Backward Computation Optimization Benchmarks
+
+Measured on an **NVIDIA H100 PCIe (80 GB)** for a single MLP projection (`T = 4096` tokens, `6144 x 2048`, `lora_r = 16`, `bfloat16`, `forward + backward`):
+
+| Plugin / Component | Key Forward & Backward Optimizations | Latency (`Before -> After`) | Peak $\Delta$VRAM (`Before -> After`) |
+| :--- | :--- | :---: | :---: |
+| **`bs2_qat`** (`Bonsai2LinearFakeQuant`, `internal_qat`) | Collapsed Identity Jacobian STE, zero-alloc `_STEGate` (fixes BF16 cancellation drift), in-place `_ternary_dequant_pq2_0_no_grad`, fused `torch.addmm` + rank-$r$ factored backward | `8.723 ms -> 7.113 ms` (**1.23x**) | `285.4 MB -> 260.9 MB` (**-24.5 MB**) |
+| **`bs_qat`** (`BitLinear`, `ternary`, `internal_qat`) | Fused FP32 `_fake_quantize_dequantize_no_grad` (eliminates `int8` roundtrip), fused `torch.addmm` + rank-$r$ factored backward (`_BitLinearInternalLoRASTE`) | `6.304 ms -> 4.741 ms` (**1.33x**) | `285.1 MB -> 236.6 MB` (**-48.5 MB**) |
+| **`qad`** (`FQLoRALinear`, `W4A16 g128`) | `@torch.no_grad()` + `_STEGate`, fused `torch.addmm` + 100% in-place `.div_().round_().clamp_().mul_()` + rank-$r$ factored backward (`_FQLoRALinearSTE`) | `4.777 ms -> 3.284 ms` (**1.45x**) | `272.6 MB -> 104.1 MB` (**-168.5 MB**) |
+| **`qad`** (`chunked_kl_loss`, `renorm`, $V=151936, k=64$) | Skips redundant full-vocab `[chunk, V]` `F.log_softmax` via softmax shift invariance + `F.kl_div(..., log_target=True)` | `67.851 ms -> 67.061 ms` (**1.01x**) | `1779.7 MB -> 894.8 MB` (**-885.0 MB**) |
+| **`llama_cpp_qat`** (`LlamaCppFakeQuantLinear`, `Q4_0`, `BF16`) | `@torch.no_grad()` + in-place block quant + `_STEGate` + native CUDA `BF16` Tensor Core preservation (hardware FP32 accumulation) | `30.824 ms -> 4.583 ms` (**6.73x**) | `514.9 MB -> 137.0 MB` (**-377.9 MB**) |
+
+</details>
+
 <details>
 <summary><h2 style="display:inline">Fork Additions: BS2_QAT (Bonsai-2 Sylvester Walsh-Hadamard + PQ2_0 Ternary QAT)</h2></summary>
 
-This fork adds **BS2_QAT** (`axolotl.integrations.bs2_qat.BS2QATPlugin`), a mathematically optimized Sylvester Walsh-Hadamard + `PQ2_0` Group-128 Least-Squares Ternary QAT integration designed for the **`Ternary-Bonsai-2-{2B, 4B, 9B, 27B}`** (`Qwen3.5`) family (`tuandunghcmut/QW-3.5-BS-2-{2B,4B,9B}-bf16`). Full documentation and mathematical derivations are in [`src/axolotl/integrations/bs2_qat/README.md`](src/axolotl/integrations/bs2_qat/README.md).
+This fork adds **BS2_QAT** (`axolotl.integrations.bs2_qat.BS2QATPlugin`), a mathematically optimized Sylvester Walsh-Hadamard + `PQ2_0` Group-128 Least-Squares Ternary QAT integration designed for the **`Ternary-Bonsai-2-{2B, 4B, 9B, 27B}`** (`Qwen3.5`) family (`tuandunghcmut/QW-3.5-BS-2-{2B,4B,9B}-bf16`). Full documentation and mathematical derivations are in [`docs/qat_plugins/01_bs2_qat_bonsai2_hadamard.md`](docs/qat_plugins/01_bs2_qat_bonsai2_hadamard.md) and [`src/axolotl/integrations/bs2_qat/README.md`](src/axolotl/integrations/bs2_qat/README.md).
 
 Highlights:
 
@@ -113,9 +137,10 @@ Highlights:
   - `llama_cpp_qat: true`
   - `llama_cpp_qat_quant_type: "Q4_0"` (or `Q4_1`, `Q8_0`, `Q8_1`, `Q1_0`, `Q2_0`)
   - `llama_cpp_qat_activation_quant: null` (or `Q8_0` for dot-product input emulation)
-  - `llama_cpp_qat_backend: "triton"` (or `"pytorch"`)
-  - `llama_cpp_qat_targets: [...]`
-  - `llama_cpp_qat_skip_targets: [...]`
+  - `llama_cpp_qat_backend: "torch"` (or `"triton"`, `"auto"`)
+  - `llama_cpp_qat_accumulator_dtype: "float32"`
+  - `llama_cpp_qat_target_names: [...]`
+  - `llama_cpp_qat_skip_names: [...]`
 - **Validated Gemma 4 E2B Examples**:
   - `examples/gemma4/e2b-q4_0-llama-cpp-qat.yaml`: LoRA text-only Q4_0 QAT.
   - `examples/gemma4/e2b-q4_0-llama-cpp-full-qat-aligned.yaml`: Full finetuning statically aligned with
